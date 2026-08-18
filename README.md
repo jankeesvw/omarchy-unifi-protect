@@ -4,6 +4,8 @@ An [Omarchy](https://omarchy.org) bar widget for [UniFi
 Protect](https://ui.com/protect) cameras: one small icon in the bar, and the
 pictures in a panel behind it.
 
+![The panel open: one camera large, the others as thumbnails, and the frames filed the last time something moved](screenshot.jpg)
+
 The bar shows a camera glyph and nothing else. It lights up, and the name of
 the camera slides in beside it, while Protect reports motion — so a camera
 that sees something is noticeable out of the corner of your eye without a
