@@ -1,0 +1,335 @@
+#!/usr/bin/env bash
+# unifi-protect — read UniFi Protect cameras, for the bar widget to call.
+#
+#   unifi-protect list             # {"ok":true,"cameras":[{"id":..,"name":..,"connected":..}]}
+#   unifi-protect snapshot <id>    # writes a JPEG, prints its path
+#   unifi-protect capture <id> [name]
+#                                  # files a snapshot in the archive; with a
+#                                  # name it also raises a desktop notification
+#   unifi-protect events [n]       # lists the archive, newest first
+#   unifi-protect stream <id>      # prints the RTSP url of the live stream
+#   unifi-protect live <id>        # opens the live RTSPS stream in mpv
+#   unifi-protect watch            # streams motion as NDJSON, one event per line
+#
+# Options, before the command:
+#   --host <host>        gateway address        (default 192.168.1.1)
+#   --rtsp-port <port>   plain RTSP port        (default 7447)
+#   --archive-keep <n>   frames kept per camera (default 60)
+#
+# Everything goes through the Protect integration API, which takes a plain
+# X-API-KEY header. That is the whole reason this script is short: the older
+# /proxy/protect/api routes want a session cookie, which means a login with a
+# TOTP code and a cookie jar that expires after a month. The key does not
+# expire and needs no second factor.
+#
+# Make one at https://<gateway>/unifi-api/protect. Note that UniFi hands a key
+# the full rights of the account that created it; there is no way to scope it
+# down to Protect over the API.
+#
+# The key is read from UNIFI_API_KEY, and failing that from the key file --
+# see `key()` below.
+
+set -uo pipefail
+
+HOST="${UNIFI_HOST:-192.168.1.1}"
+RTSP_PORT="${UNIFI_RTSP_PORT:-7447}"
+ARCHIVE_KEEP="${UNIFI_ARCHIVE_KEEP:-60}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --host)         HOST="${2:-}"; shift 2 ;;
+    --rtsp-port)    RTSP_PORT="${2:-}"; shift 2 ;;
+    --archive-keep) ARCHIVE_KEEP="${2:-}"; shift 2 ;;
+    --) shift; break ;;
+    *) break ;;
+  esac
+done
+
+API="https://$HOST/proxy/protect/integration/v1"
+TIMEOUT=8
+SNAPSHOT_TIMEOUT=20
+CACHE_DIR="${XDG_RUNTIME_DIR:-/tmp}/unifi-protect"
+# The archive outlives a reboot, so it lives in state rather than runtime.
+ARCHIVE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/unifi-protect/events"
+KEY_FILE="${UNIFI_API_KEY_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/unifi-protect/api-key}"
+# Seconds within which a second request for the same camera is answered with
+# the frame already on disk.
+ARCHIVE_DEBOUNCE=15
+# How long the notification stays up, in milliseconds.
+NOTIFY_TIMEOUT=8000
+
+fail() {
+  printf '{"ok":false,"error":"%s"}\n' "$1"
+  exit 1
+}
+
+# The key, from the environment if it is there, otherwise from the key file.
+#
+# The environment is the quicker of the two and needs nothing on disk, but it
+# only reaches the shell after the next login, so a key file is what makes the
+# widget work the moment you have installed it. The file is the key and
+# nothing else: the first line with something on it, trimmed. No comment
+# syntax, because a key is free to contain any character a comment marker
+# would eat.
+key() {
+  if [[ -n "${UNIFI_API_KEY:-}" ]]; then
+    printf '%s' "$UNIFI_API_KEY"
+    return
+  fi
+
+  [[ -r "$KEY_FILE" ]] || return
+  local line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -n "$line" ]] || continue
+    printf '%s' "$line"
+    return
+  done < "$KEY_FILE"
+}
+
+KEY="$(key)"
+[[ -n "$KEY" ]] || fail "no API key: set UNIFI_API_KEY or write one to $KEY_FILE"
+
+# -k because the gateway serves a certificate for its own hostname that no
+# machine on the LAN has a chain for. This is traffic to an address you typed
+# yourself, on your own network.
+api() {
+  curl -s -k -m "$TIMEOUT" -H "X-API-KEY: $KEY" "$API$1"
+}
+
+case "${1:-list}" in
+  list)
+    body="$(api /cameras)" || fail "unreachable"
+    [[ -n "$body" ]] || fail "unreachable"
+    printf '%s' "$body" | jq -c '
+      if type == "array" then
+        {ok: true, cameras: [.[] | {id, name, connected: (.state == "CONNECTED")}]}
+      else
+        {ok: false, error: (.error.message // "unexpected response")}
+      end' 2>/dev/null || fail "bad response"
+    ;;
+
+  snapshot)
+    id="${2:-}"
+    [[ -n "$id" ]] || fail "usage: unifi-protect snapshot <camera-id>"
+    mkdir -p -- "$CACHE_DIR" || fail "cannot write $CACHE_DIR"
+
+    # A fresh filename every time. QML's Image caches by URL, so overwriting
+    # one path would leave the widget showing the first frame forever; a new
+    # name means the source changes and the picture actually updates.
+    out="$CACHE_DIR/$id-$(date +%s%3N).jpg"
+    code="$(curl -s -k -m "$SNAPSHOT_TIMEOUT" -H "X-API-KEY: $KEY" \
+      -o "$out" -w '%{http_code}' "$API/cameras/$id/snapshot")"
+
+    if [[ "$code" != "200" || ! -s "$out" ]]; then
+      rm -f -- "$out"
+      fail "snapshot failed (http $code)"
+    fi
+
+    # Keep the two newest frames per camera: one being shown, one just
+    # written. Anything older is a file QML is done with.
+    # shellcheck disable=SC2012
+    ls -t -- "$CACHE_DIR/$id-"*.jpg 2>/dev/null | tail -n +3 | while read -r old; do
+      rm -f -- "$old"
+    done
+
+    printf '%s\n' "$out"
+    ;;
+
+  capture)
+    id="${2:-}"
+    # A display name turns this into a notification as well. It is passed in
+    # rather than looked up so that filing a frame stays one HTTP call.
+    name="${3:-}"
+    [[ -n "$id" ]] || fail "usage: unifi-protect capture <camera-id> [name]"
+    mkdir -p -- "$ARCHIVE_DIR" || fail "cannot write $ARCHIVE_DIR"
+
+    # There is one bar per monitor and each runs its own copy of the widget,
+    # so the same motion asks for a capture more than once. Whoever asks
+    # second gets the frame the first one filed rather than a near-duplicate.
+    #
+    # Behind a lock, because the two arrive within milliseconds of each other
+    # and a snapshot takes a third of a second: without it both would look,
+    # both would see nothing recent, and both would file a frame and raise a
+    # notification. The second one waits here and then finds the first one's
+    # work below.
+    exec 9>"$ARCHIVE_DIR/.$id.lock"
+    flock 9
+
+    now="$(date +%s)"
+    # shellcheck disable=SC2012
+    newest="$(ls -t -- "$ARCHIVE_DIR/$id-"*.jpg 2>/dev/null | head -1)"
+    if [[ -n "$newest" ]]; then
+      newest_ts="${newest##*-}"
+      newest_ts="${newest_ts%.jpg}"
+      if [[ "$newest_ts" =~ ^[0-9]+$ ]] && (( now - newest_ts < ARCHIVE_DEBOUNCE )); then
+        # No notification on this path on purpose: the second bar asking for
+        # the same motion must not raise a second popup.
+        printf '%s\n' "$newest"
+        exit 0
+      fi
+    fi
+
+    tmp="$ARCHIVE_DIR/.$id.tmp.jpg"
+    out="$ARCHIVE_DIR/$id-$now.jpg"
+    code="$(curl -s -k -m "$SNAPSHOT_TIMEOUT" -H "X-API-KEY: $KEY" \
+      -o "$tmp" -w '%{http_code}' "$API/cameras/$id/snapshot")"
+
+    if [[ "$code" != "200" || ! -s "$tmp" ]]; then
+      rm -f -- "$tmp"
+      fail "capture failed (http $code)"
+    fi
+
+    # Stored small. A full snapshot is 750 KB and the archive is browsed as
+    # thumbnails, so keeping them at camera resolution would spend a hundred
+    # megabytes to show pictures a few hundred pixels wide.
+    if command -v magick >/dev/null 2>&1; then
+      magick "$tmp" -resize 960x -quality 82 "$out" 2>/dev/null || mv -- "$tmp" "$out"
+      rm -f -- "$tmp"
+    else
+      mv -- "$tmp" "$out"
+    fi
+
+    # shellcheck disable=SC2012
+    ls -t -- "$ARCHIVE_DIR/$id-"*.jpg 2>/dev/null | tail -n +$((ARCHIVE_KEEP + 1)) | while read -r old; do
+      rm -f -- "$old"
+    done
+
+    if [[ -n "$name" ]] && command -v notify-send >/dev/null 2>&1; then
+      # The frame itself is the icon, so the notification answers "who" rather
+      # than only "something moved".
+      notify-send -t "$NOTIFY_TIMEOUT" -i "$out" -a "Camera" \
+        "Motion at $name" "$(date '+%H:%M')" 2>/dev/null || true
+    fi
+
+    printf '%s\n' "$out"
+    ;;
+
+  events)
+    # Newest first, so the panel can take the head of the list and stop.
+    if [[ ! -d "$ARCHIVE_DIR" ]]; then
+      printf '{"ok":true,"events":[]}\n'
+      exit 0
+    fi
+    # shellcheck disable=SC2012
+    ls -t -- "$ARCHIVE_DIR"/*.jpg 2>/dev/null | head -n "${2:-24}" | jq -R -s -c '
+      {ok: true, events: [
+        split("\n") | .[] | select(length > 0) |
+        {path: .} + (
+          (. | split("/") | last | rtrimstr(".jpg") | split("-")) as $parts |
+          {camera: $parts[0], ts: ($parts[1] | tonumber)}
+        )
+      ]}'
+    ;;
+
+  stream)
+    id="${2:-}"
+    [[ -n "$id" ]] || fail "usage: unifi-protect stream <camera-id>"
+    url="$(api "/cameras/$id/rtsps-stream" | jq -r '.high // .medium // .low // empty')"
+    [[ -n "$url" ]] || fail "no stream for camera $id"
+
+    # Protect hands out an rtsps:// URL on 7441, secured with the gateway's
+    # self-signed certificate. Qt Multimedia gives no way to skip that check,
+    # so this rewrites it to the plain rtsp:// port, which carries the same
+    # stream unencrypted. That is LAN traffic to your own gateway; `live`
+    # keeps the encrypted URL because mpv can be told to accept the
+    # certificate.
+    alias="${url##*/}"
+    printf 'rtsp://%s:%s/%s\n' "$HOST" "$RTSP_PORT" "${alias%%\?*}"
+    ;;
+
+  live)
+    id="${2:-}"
+    [[ -n "$id" ]] || fail "usage: unifi-protect live <camera-id>"
+    url="$(api "/cameras/$id/rtsps-stream" | jq -r '.high // .medium // .low // empty')"
+    [[ -n "$url" ]] || fail "no stream for camera $id"
+
+    # The gateway serves a self-signed certificate, so certificate checking is
+    # the one thing that has to give; the stream itself stays encrypted. mpv's
+    # own --tls-verify only covers https, hence the libavformat option.
+    exec mpv --title="UniFi camera" \
+      --rtsp-transport=tcp --demuxer-lavf-o=tls_verify=0 \
+      --profile=low-latency --no-terminal "$url"
+    ;;
+
+  watch)
+    # Motion arrives over a websocket, which bash cannot speak, so this one
+    # subcommand borrows python. It prints one JSON object per line and runs
+    # until killed, which is what Quickshell's SplitParser wants to read.
+    #
+    # The connection must be HTTP/1.1: over HTTP/2 the gateway answers the
+    # upgrade with a 404 rather than refusing it, which looks exactly like a
+    # missing endpoint. websockets does 1.1, so this is only a trap when
+    # testing by hand with curl.
+    export UNIFI_WATCH_KEY="$KEY" UNIFI_WATCH_HOST="$HOST"
+    exec python3 -u -c '
+import asyncio, json, os, ssl, sys
+
+try:
+    import websockets
+except ImportError:
+    print(json.dumps({
+        "type": "error",
+        "error": "the python websockets package is missing; motion events are off",
+    }), flush=True)
+    sys.exit(1)
+
+key = os.environ["UNIFI_WATCH_KEY"]
+host = os.environ["UNIFI_WATCH_HOST"]
+url = f"wss://{host}/proxy/protect/integration/v1/subscribe/events"
+
+ctx = ssl.create_default_context()
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
+
+
+def emit(obj):
+    print(json.dumps(obj), flush=True)
+
+
+async def listen():
+    async with websockets.connect(
+        url, ssl=ctx, additional_headers={"X-API-KEY": key},
+        ping_interval=30, close_timeout=5,
+    ) as ws:
+        emit({"type": "connected"})
+        async for raw in ws:
+            try:
+                msg = json.loads(raw)
+            except (ValueError, TypeError):
+                continue
+            item = msg.get("item") or {}
+            kind = item.get("type") or msg.get("type")
+            if kind not in ("motion", "smartDetectZone", "smartDetectLine"):
+                continue
+            emit({
+                "type": "motion",
+                "camera": item.get("camera") or item.get("device"),
+                "kind": kind,
+                "detections": item.get("smartDetectTypes") or [],
+                "ended": item.get("end") is not None,
+            })
+
+
+async def main():
+    # Reconnect rather than exit: the widget starts this once and expects it
+    # to still be there after the gateway reboots or the wifi blinks.
+    delay = 1
+    while True:
+        try:
+            await listen()
+            delay = 1
+        except Exception as e:
+            emit({"type": "error", "error": str(e)})
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 60)
+
+
+asyncio.run(main())
+' ;;
+
+  *)
+    fail "unknown command: $1"
+    ;;
+esac

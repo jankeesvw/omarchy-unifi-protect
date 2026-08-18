@@ -1,0 +1,125 @@
+{
+  "schemaVersion": 1,
+  "id": "jankeesvw.unifi-protect",
+  "name": "UniFi Protect",
+  "version": "1.0.0",
+  "author": "Jankees van Woezik",
+  "description": "UniFi Protect cameras: one icon in the bar, the pictures in a panel",
+  "homepage": "https://github.com/jankeesvw/omarchy-unifi-protect",
+  "license": "MIT",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "UniFi Protect",
+    "description": "UniFi Protect cameras: one icon in the bar, the pictures in a panel",
+    "category": "Home",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "host": "192.168.1.1",
+      "alertCameras": "",
+      "notify": true,
+      "panelWidth": 800,
+      "refreshMs": 1000,
+      "motionHoldMs": 45000,
+      "captureThrottleMs": 25000,
+      "archiveKeep": 60,
+      "rtspPort": 7447,
+      "eventsUrl": "https://{host}/protect/detections/find-anything?grade=all&labels=camera%3A{camera}&minConfidence=30"
+    },
+    "schema": [
+      {
+        "key": "host",
+        "type": "string",
+        "label": "Gateway",
+        "defaultValue": "192.168.1.1",
+        "description": "Address of the console running Protect: a UDM, a Cloud Key, or whatever else answers on your network. An IP address or a hostname, without the scheme."
+      },
+      {
+        "key": "alertCameras",
+        "type": "string",
+        "label": "Cameras that may interrupt you",
+        "defaultValue": "",
+        "description": "Camera names, comma separated, exactly as Protect spells them. Empty means every camera. This gates the bar icon and the archive both: the camera aimed at your own desk reports motion all day, and an icon that is always lit is an icon you stop reading."
+      },
+      {
+        "key": "notify",
+        "type": "boolean",
+        "label": "Raise a notification on motion",
+        "defaultValue": true,
+        "description": "A desktop notification with the frame in it, so motion reaches you when the bar is not where you are looking."
+      },
+      {
+        "key": "panelWidth",
+        "type": "integer",
+        "label": "Panel width",
+        "min": 400,
+        "max": 1600,
+        "step": 20,
+        "defaultValue": 800,
+        "description": "In the shell's spacing units. The live view is this wide and everything else is measured off it, so this one number sizes the whole panel. Anything wider than the screen is trimmed to fit."
+      },
+      {
+        "key": "motionHoldMs",
+        "type": "integer",
+        "label": "Keep the icon lit for",
+        "min": 1000,
+        "max": 300000,
+        "step": 1000,
+        "defaultValue": 45000,
+        "description": "Milliseconds. Protect sends a start and, later, an end; this is the floor under a burst that ends immediately, so a moment of movement is still there when you look up."
+      },
+      {
+        "key": "refreshMs",
+        "type": "integer",
+        "label": "Snapshot interval",
+        "min": 250,
+        "max": 10000,
+        "step": 250,
+        "defaultValue": 1000,
+        "description": "Milliseconds between stills for the selected camera while the video stream is connecting or has dropped out. Once the stream plays, this stops."
+      },
+      {
+        "key": "captureThrottleMs",
+        "type": "integer",
+        "label": "Leave a camera alone for",
+        "min": 0,
+        "max": 600000,
+        "step": 1000,
+        "defaultValue": 25000,
+        "description": "Milliseconds after filing a frame in which the same camera files nothing more. Protect can report a dozen starts while one person walks past the door."
+      },
+      {
+        "key": "archiveKeep",
+        "type": "integer",
+        "label": "Frames kept per camera",
+        "min": 1,
+        "max": 500,
+        "step": 10,
+        "defaultValue": 60,
+        "description": "The archive under the panel. Frames are stored around 960px wide, so sixty of them is a few megabytes and covers a busy day."
+      },
+      {
+        "key": "rtspPort",
+        "type": "integer",
+        "label": "RTSP port",
+        "min": 1,
+        "max": 65535,
+        "step": 1,
+        "defaultValue": 7447,
+        "description": "Protect hands out an encrypted rtsps:// URL that Qt cannot be told to trust, so the live view reads the same stream off the plain RTSP port instead. 7447 unless you have moved it."
+      },
+      {
+        "key": "eventsUrl",
+        "type": "string",
+        "label": "Where a click on the picture goes",
+        "defaultValue": "https://{host}/protect/detections/find-anything?grade=all&labels=camera%3A{camera}&minConfidence=30",
+        "description": "Protect's detection browser, filtered to the camera you clicked. {host} is the gateway above and {camera} the camera id. A setting rather than a constant, because Protect is a single-page app: this route was read off the address bar and a UniFi update is free to move it."
+      }
+    ]
+  }
+}
