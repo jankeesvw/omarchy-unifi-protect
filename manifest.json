@@ -23,6 +23,7 @@
       "host": "192.168.1.1",
       "alertCameras": "",
       "notify": true,
+      "viewerCommand": "xdg-open {path}",
       "panelWidth": 800,
       "refreshMs": 1000,
       "motionHoldMs": 45000,
@@ -52,6 +53,13 @@
         "label": "Raise a notification on motion",
         "defaultValue": true,
         "description": "A desktop notification with the frame in it, so motion reaches you when the bar is not where you are looking."
+      },
+      {
+        "key": "viewerCommand",
+        "type": "string",
+        "label": "Where a click on the notification goes",
+        "defaultValue": "xdg-open {path}",
+        "description": "The command that opens the frame full size when you click the popup, with {path} standing in for the picture. The default hands it to whatever your desktop opens a JPEG with; name a viewer here to be sure of which one, or leave it empty to have the popup do nothing."
       },
       {
         "key": "panelWidth",

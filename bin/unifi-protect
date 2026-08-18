@@ -15,6 +15,8 @@
 #   --host <host>        gateway address        (default 192.168.1.1)
 #   --rtsp-port <port>   plain RTSP port        (default 7447)
 #   --archive-keep <n>   frames kept per camera (default 60)
+#   --viewer <command>   opens the frame when the notification is clicked
+#                        (default "xdg-open {path}")
 #
 # Everything goes through the Protect integration API, which takes a plain
 # X-API-KEY header. That is the whole reason this script is short: the older
@@ -34,12 +36,18 @@ set -uo pipefail
 HOST="${UNIFI_HOST:-192.168.1.1}"
 RTSP_PORT="${UNIFI_RTSP_PORT:-7447}"
 ARCHIVE_KEEP="${UNIFI_ARCHIVE_KEEP:-60}"
+# What a click on the motion notification runs. {path} is the frame that was
+# just filed; a command without the placeholder gets the path appended. Empty
+# means the notification stays inert.
+VIEWER_DEFAULT='xdg-open {path}'
+VIEWER="${UNIFI_VIEWER-$VIEWER_DEFAULT}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --host)         HOST="${2:-}"; shift 2 ;;
     --rtsp-port)    RTSP_PORT="${2:-}"; shift 2 ;;
     --archive-keep) ARCHIVE_KEEP="${2:-}"; shift 2 ;;
+    --viewer)       VIEWER="${2:-}"; shift 2 ;;
     --) shift; break ;;
     *) break ;;
   esac
@@ -61,6 +69,21 @@ NOTIFY_TIMEOUT=8000
 fail() {
   printf '{"ok":false,"error":"%s"}\n' "$1"
   exit 1
+}
+
+# The command a click on the notification runs, with the frame filled in.
+#
+# The notification server takes this as a hint and runs it through `bash -lc`
+# when the popup is clicked, so the path is quoted here: an archive lives
+# under $HOME and a home directory is allowed a space in it.
+viewer_command() {
+  local quoted
+  printf -v quoted '%q' "$1"
+  if [[ "$VIEWER" == *"{path}"* ]]; then
+    printf '%s' "${VIEWER//\{path\}/$quoted}"
+  else
+    printf '%s %s' "$VIEWER" "$quoted"
+  fi
 }
 
 # The key, from the environment if it is there, otherwise from the key file.
@@ -199,7 +222,20 @@ case "${1:-list}" in
     if [[ -n "$name" ]] && command -v notify-send >/dev/null 2>&1; then
       # The frame itself is the icon, so the notification answers "who" rather
       # than only "something moved".
+      #
+      # An icon is a thumbnail, though, and the thing you want when something
+      # moved is a good look at it. Clicking the popup opens the same frame
+      # full size: the command travels as the `omarchy-exec` hint, which the
+      # shell's notification server stores with the toast and runs on click.
+      # A libnotify action would be the portable way to say this, but
+      # notify-send has to stay alive to receive one, and this script is over
+      # in a third of a second.
+      notify_hints=()
+      viewer="$(viewer_command "$out")"
+      [[ -n "$VIEWER" ]] && notify_hints+=(-h "string:omarchy-exec:$viewer")
+
       notify-send -t "$NOTIFY_TIMEOUT" -i "$out" -a "Camera" \
+        "${notify_hints[@]}" \
         "Motion at $name" "$(date '+%H:%M')" 2>/dev/null || true
     fi
 

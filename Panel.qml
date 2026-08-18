@@ -46,12 +46,17 @@ Panel {
   readonly property string host: setting("host", "192.168.1.1")
   readonly property int rtspPort: setting("rtspPort", 7447)
   readonly property int archiveKeep: setting("archiveKeep", 60)
+  // What a click on the motion notification runs, {path} standing in for the
+  // frame. A setting because an image viewer is a matter of taste, and empty
+  // for anybody who would rather the popup did nothing.
+  readonly property string viewerCommand: setting("viewerCommand", "xdg-open {path}")
 
   function cmd(args) {
     return [root.script,
             "--host", root.host,
             "--rtsp-port", String(root.rtspPort),
-            "--archive-keep", String(root.archiveKeep)].concat(args)
+            "--archive-keep", String(root.archiveKeep),
+            "--viewer", root.viewerCommand].concat(args)
   }
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground

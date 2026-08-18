@@ -64,6 +64,7 @@ widget's entry in `~/.config/omarchy/shell.json`:
 | `host` | `192.168.1.1` | The console running Protect — a UDM, a Cloud Key, whatever answers on your network. Address or hostname, no scheme. |
 | `alertCameras` | *(empty)* | Camera names, comma separated, that may light the icon and file frames. Empty means all of them. |
 | `notify` | `true` | Raise a desktop notification, with the frame in it, on motion. |
+| `viewerCommand` | `xdg-open {path}` | What clicking that notification runs, to see the frame full size. |
 | `panelWidth` | `800` | Panel width in the shell's spacing units. Trimmed to fit a small screen. |
 | `motionHoldMs` | `45000` | How long the icon stays lit after motion. |
 | `refreshMs` | `1000` | How often the large view gets a fresh still while the stream is connecting. |
@@ -82,6 +83,20 @@ motion all day, and an icon that is always lit is an icon you stop reading:
 Names are matched against what Protect calls the cameras, ignoring case. The
 setting gates the bar icon and the archive both; every camera stays visible in
 the panel regardless.
+
+The notification carries the frame as its icon, which is a thumbnail; clicking
+it opens the same picture full size. `viewerCommand` is what runs, with
+`{path}` standing in for the frame:
+
+```json
+{ "id": "jankeesvw.unifi-protect", "viewerCommand": "imv {path}" }
+```
+
+The default hands the file to whatever your desktop opens a JPEG with. Name a
+viewer to be sure of which one, or leave it empty for a popup that does
+nothing. The command goes out as the `omarchy-exec` hint, which the shell's
+notification server keeps with the toast, so a frame is still one click away
+after the popup has moved into the notification history.
 
 `eventsUrl` is Protect's detection browser filtered to one camera. `{host}` is
 the console and `{camera}` the camera id, and the default is:
