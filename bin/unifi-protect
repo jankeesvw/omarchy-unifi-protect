@@ -371,7 +371,34 @@ case "${1:-list}" in
     # testing by hand with curl.
     tls_args
     export UNIFI_WATCH_KEY="$KEY" UNIFI_WATCH_HOST="$HOST" UNIFI_WATCH_CERT="$CERT_FILE"
-    exec python3 -u -c '
+    # python3 plus the system websockets package, or a user venv created on
+    # first watch. A fresh Omarchy install has python3 but not
+    # python-websockets, and the icon should still light up without sudo.
+    watch_python() {
+      if python3 -c 'import websockets' >/dev/null 2>&1; then
+        printf '%s' python3
+        return
+      fi
+
+      local venv="${XDG_DATA_HOME:-$HOME/.local/share}/unifi-protect/venv"
+      local py="$venv/bin/python"
+      if [[ -x $py ]] && "$py" -c 'import websockets' >/dev/null 2>&1; then
+        printf '%s' "$py"
+        return
+      fi
+
+      python3 -m venv "$venv" >/dev/null 2>&1 || return 1
+      if command -v uv >/dev/null 2>&1; then
+        uv pip install --python "$py" --quiet websockets >/dev/null 2>&1 || return 1
+      else
+        "$py" -m pip install --quiet websockets >/dev/null 2>&1 || return 1
+      fi
+      "$py" -c 'import websockets' >/dev/null 2>&1 || return 1
+      printf '%s' "$py"
+    }
+    WATCH_PY="$(watch_python || true)"
+    [[ -n $WATCH_PY ]] || WATCH_PY=python3
+    exec "$WATCH_PY" -u -c '
 import asyncio, json, os, re, ssl, sys
 
 try:

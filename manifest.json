@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "jankeesvw.unifi-protect",
   "name": "UniFi Protect",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "Jankees van Woezik",
   "description": "UniFi Protect cameras: one icon in the bar, the pictures in a panel",
   "homepage": "https://github.com/jankeesvw/omarchy-unifi-protect",

@@ -28,6 +28,10 @@ console is — the three sections below. The widget lands in the right section
 of the bar; move it with `omarchy bar move`, or from the bar's own settings
 panel.
 
+A fresh Omarchy install does not have a Protect console at the default
+address (`192.168.1.1`). Set `host` before you expect the icon to do
+anything, or the first list talks to the wrong gateway.
+
 ## The API key
 
 Everything goes through Protect's integration API, which takes a plain
@@ -185,12 +189,19 @@ cd ~/.config/omarchy/plugins/jankeesvw.unifi-protect
 the first place to look when the bar icon stays dim: run `list` by hand and the
 error comes back as JSON instead of disappearing into the shell's log.
 
-To exercise the icon without waiting for somebody to walk past a camera:
+To see what the widget thinks is going on, or to exercise the icon without
+waiting for somebody to walk past a camera:
 
 ```bash
+omarchy-shell jankeesvw.unifi-protect.test status
 omarchy-shell jankeesvw.unifi-protect.test motion "Front door"
 omarchy-shell jankeesvw.unifi-protect.test clear
 ```
+
+`status` prints the host it is calling, whether the last list succeeded, and
+the cameras it has. If that host is still `192.168.1.1` after you set a
+different one, restart the shell (`omarchy restart shell`) so the widget
+picks the setting up.
 
 ## Requirements
 
@@ -199,14 +210,19 @@ Omarchy with `omarchy-shell` (the Quickshell-based bar), and:
 | | |
 |---|---|
 | `curl`, `jq` | talking to Protect |
-| `python3` + [`websockets`](https://pypi.org/project/websockets/) | motion events. Without it everything works except the icon lighting up. |
+| `python3` + [`websockets`](https://pypi.org/project/websockets/) | motion events. The system package is used if present; otherwise a user venv is created on first watch, so a fresh install does not need sudo. Without either, everything works except the icon lighting up. |
 | `imagemagick` | shrinking archived frames. Without it they are stored full size. |
 | `libnotify` | the notification on motion |
 | `mpv` | only for `unifi-protect live` |
 
-On Arch:
+On Arch, the tidy way is the system package. Omarchy's `omarchy pkg add`
+installs it if you want that; `watch` will also create
+`~/.local/share/unifi-protect/venv` and put `websockets` there the first
+time it needs it.
 
 ```bash
+omarchy pkg add python-websockets
+# or
 sudo pacman -S --needed curl jq python python-websockets imagemagick libnotify mpv
 ```
 
