@@ -59,6 +59,27 @@ Panel {
             "--viewer", root.viewerCommand].concat(args)
   }
 
+  // The bar assigns `settings` from a Qt.callLater, one event-loop turn after
+  // it constructs the widget, so anything started at completion runs against
+  // the fallbacks above rather than the shell.json entry. listProc recovers on
+  // its next tick ten minutes on; watchProc is started once and never
+  // restarts, so on any console that isn't 192.168.1.1 motion never reaches
+  // the bar for the life of the shell. Restarting on a changed command covers
+  // that first turn and a setting edited later both — which is what the
+  // comment above the host property promises.
+  readonly property var watchCommand: root.cmd(["watch"])
+
+  onWatchCommandChanged: {
+    // The in-flight list ran against the old settings; letting it finish would
+    // leave the widget marked unreachable until the timer comes back around.
+    watchProc.running = false
+    listProc.running = false
+    Qt.callLater(function() {
+      watchProc.running = true
+      listProc.running = true
+    })
+  }
+
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
@@ -316,7 +337,7 @@ Panel {
   Process {
     id: watchProc
     running: true
-    command: root.cmd(["watch"])
+    command: root.watchCommand
     stdout: SplitParser {
       onRead: function(line) {
         var event
