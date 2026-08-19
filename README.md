@@ -4,7 +4,7 @@ An [Omarchy](https://omarchy.org) bar widget for [UniFi
 Protect](https://ui.com/protect) cameras: one small icon in the bar, and the
 pictures in a panel behind it.
 
-![The panel open: one camera large, the others as thumbnails, and the frames filed the last time something moved](screenshot.jpg)
+![The panel open: one camera large, the others as thumbnails, and the frames filed the last time something moved](preview.jpg)
 
 The bar shows a camera glyph and nothing else. It lights up, and the name of
 the camera slides in beside it, while Protect reports motion — so a camera
@@ -23,9 +23,10 @@ where you go when a glance is not enough.
 omarchy plugin add https://github.com/jankeesvw/omarchy-unifi-protect.git --enable
 ```
 
-Then give it a key and tell it where your console is — the two sections below.
-The widget lands in the right section of the bar; move it with `omarchy bar
-move`, or from the bar's own settings panel.
+Then give it a key, pin your console's certificate, and tell it where the
+console is — the three sections below. The widget lands in the right section
+of the bar; move it with `omarchy bar move`, or from the bar's own settings
+panel.
 
 ## The API key
 
@@ -33,9 +34,15 @@ Everything goes through Protect's integration API, which takes a plain
 `X-API-KEY` header. Make a key at `https://<your-console>/unifi-api/protect`.
 
 > ⚠️ UniFi hands a key the full rights of the account that created it, and
-> there is no way to scope it down to Protect over the API. Make it on an
-> account you are comfortable handing a shell widget, not on your own admin
-> login.
+> there is no way to scope it down to Protect over the API. A key made on your
+> own admin login is your whole console in a file on your laptop.
+>
+> Make a local user for it instead. Under **Settings → Admins & Users → Add
+> User**, choose a local account, give it **Protect: View Only** and nothing
+> else, and make the key while signed in as that user. The widget only ever
+> lists cameras, pulls stills and reads stream urls, so view-only is all it
+> needs — and a key that leaks is then a key that can look at your cameras
+> rather than one that can reconfigure your network.
 
 The widget looks for the key in two places, in this order:
 
@@ -53,6 +60,28 @@ mkdir -p ~/.config/unifi-protect
 
 The first line with something on it is the key, trimmed. Nothing else in the
 file is parsed, and the widget never writes to it.
+
+## Pinning the console
+
+Your console signs its own certificate. There is no authority that can vouch
+for it, so there is nothing to check it against — and the key above travels on
+every one of these connections. Pin it once:
+
+```bash
+~/.config/omarchy/plugins/jankeesvw.unifi-protect/bin/unifi-protect \
+  --host 192.168.1.1 trust
+```
+
+It prints the fingerprint of whatever answered on that address and waits.
+Compare it against the one the console shows under **Settings → System →
+Advanced** before you agree — that comparison is the whole of the security
+here, and it is the one moment you get to make it. Then the certificate is
+filed in `~/.config/unifi-protect/gateway.pem` and every later connection has
+to present that same key or be dropped before the API key goes out.
+
+Until you have done this the widget refuses to talk to anything, and says so.
+Run it again after a console reset or a certificate renewal, which is the only
+other time the fingerprint should change.
 
 ## Settings
 
@@ -181,12 +210,22 @@ On Arch:
 sudo pacman -S --needed curl jq python python-websockets imagemagick libnotify mpv
 ```
 
-Certificate checking is off for calls to the console: it serves a certificate
-for its own hostname that no machine on your network has a chain for. This is
-traffic to an address you typed yourself, on your own LAN. The live view also
-reads the stream off the plain RTSP port rather than the encrypted one, because
-Qt Multimedia gives no way to trust a self-signed certificate; `unifi-protect
-live` keeps the encrypted URL, since mpv can be told to accept it.
+Chain and hostname checking are off for calls to the console — its
+certificate names the console, not the address you reach it on, and nothing on
+your network can build a chain to it. What replaces them is the certificate
+you pinned: curl is given `--pinnedpubkey`, which it enforces regardless, and
+the motion websocket loads the pinned certificate as its only trust root. A
+connection that presents anything else is dropped before the API key is sent.
+
+Camera ids come off those connections and end up in filenames, so they are
+checked against `[A-Za-z0-9]{1,64}` — Protect's own format — and anything else
+is refused rather than escaped.
+
+The live view reads the stream off the plain RTSP port rather than the
+encrypted one, because Qt Multimedia gives no way to trust a self-signed
+certificate; `unifi-protect live` keeps the encrypted URL, since mpv can be
+told to accept it. Neither carries the API key: Protect hands back a
+per-camera stream alias and that is all that travels.
 
 ## Remove
 
@@ -196,7 +235,8 @@ omarchy plugin remove jankeesvw.unifi-protect
 
 The archived frames are yours, not the plugin's, so they stay in
 `~/.local/state/unifi-protect/`. Delete that directory, and
-`~/.config/unifi-protect/` with the key in it, if you want them gone too.
+`~/.config/unifi-protect/` with the key and the pinned certificate in it, if
+you want them gone too.
 
 ## License
 

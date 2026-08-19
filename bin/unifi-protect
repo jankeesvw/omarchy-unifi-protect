@@ -10,6 +10,7 @@
 #   unifi-protect stream <id>      # prints the RTSP url of the live stream
 #   unifi-protect live <id>        # opens the live RTSPS stream in mpv
 #   unifi-protect watch            # streams motion as NDJSON, one event per line
+#   unifi-protect trust            # pins the gateway's certificate; run once
 #
 # Options, before the command:
 #   --host <host>        gateway address        (default 192.168.1.1)
@@ -30,6 +31,14 @@
 #
 # The key is read from UNIFI_API_KEY, and failing that from the key file --
 # see `key()` below.
+#
+# Because that key is worth as much as the account behind it, nothing here
+# talks to the gateway until its certificate has been pinned with
+# `unifi-protect trust`. The gateway signs its own certificate, so there is no
+# chain to check it against and no authority to ask; pinning is what turns
+# "some host answered on this address" into "the host I looked at when I set
+# this up". Without it the -k every one of these calls needs would hand the
+# key to whatever answered.
 
 set -uo pipefail
 
@@ -60,6 +69,8 @@ CACHE_DIR="${XDG_RUNTIME_DIR:-/tmp}/unifi-protect"
 # The archive outlives a reboot, so it lives in state rather than runtime.
 ARCHIVE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/unifi-protect/events"
 KEY_FILE="${UNIFI_API_KEY_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/unifi-protect/api-key}"
+# The gateway's certificate, as pinned by `unifi-protect trust`.
+CERT_FILE="${UNIFI_CERT_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/unifi-protect/gateway.pem}"
 # Seconds within which a second request for the same camera is answered with
 # the frame already on disk.
 ARCHIVE_DEBOUNCE=15
@@ -111,18 +122,66 @@ key() {
   done < "$KEY_FILE"
 }
 
+# Camera ids arrive over the network -- from the listing, and from the motion
+# websocket -- and are then spliced into filenames, globs and lock paths. A
+# Protect id is flat alphanumeric, so anything else is refused outright rather
+# than escaped: a value carrying a slash or a dot is not an id that needs
+# cleaning up, it is a sign that what is on the other end is not Protect.
+#
+# The flat alphabet also keeps `events` honest, which reads the camera back
+# out of the filename by splitting on the dash.
+valid_id() {
+  [[ "$1" =~ ^[A-Za-z0-9]{1,64}$ ]]
+}
+
+check_id() {
+  valid_id "${1:-}" || fail "not a camera id"
+}
+
 KEY="$(key)"
 [[ -n "$KEY" ]] || fail "no API key: set UNIFI_API_KEY or write one to $KEY_FILE"
 
-# -k because the gateway serves a certificate for its own hostname that no
-# machine on the LAN has a chain for. This is traffic to an address you typed
-# yourself, on your own network.
+# The SHA-256 of the pinned certificate's public key, in the form curl wants.
+# Read off the first certificate in the file, which is the gateway's own.
+spki() {
+  openssl x509 -in "$1" -pubkey -noout 2>/dev/null \
+    | openssl pkey -pubin -outform der 2>/dev/null \
+    | openssl dgst -sha256 -binary 2>/dev/null \
+    | base64 | tr -d '\n'
+}
+
+# Every call that carries the key goes through this first. Resolved in the
+# main shell rather than lazily inside api(), which runs in a subshell where
+# an exit would be reported back as nothing more than an unreachable gateway.
+PIN=""
+require_pin() {
+  [[ -n "$PIN" ]] && return
+  [[ -r "$CERT_FILE" ]] || fail "gateway not trusted yet: run 'unifi-protect --host $HOST trust'"
+  PIN="$(spki "$CERT_FILE")"
+  [[ -n "$PIN" ]] || fail "no certificate in $CERT_FILE: run 'unifi-protect --host $HOST trust' again"
+}
+
+# -k is still here and still cannot go: the certificate names the console, not
+# the address you reach it on, so neither the chain nor the hostname will ever
+# check out. --pinnedpubkey is enforced anyway -- curl checks the pin whether
+# or not verification was switched off -- so what is actually required of the
+# far end is that it holds the key of the certificate you pinned. Anything
+# else, including a gateway whose certificate was replaced behind your back,
+# gets the connection dropped before the header goes out.
+CURL_TLS=()
+tls_args() {
+  require_pin
+  CURL_TLS=(-k --pinnedpubkey "sha256//$PIN")
+}
+
 api() {
-  curl -s -k -m "$TIMEOUT" -H "X-API-KEY: $KEY" "$API$1"
+  tls_args
+  curl -s "${CURL_TLS[@]}" -m "$TIMEOUT" -H "X-API-KEY: $KEY" "$API$1"
 }
 
 case "${1:-list}" in
   list)
+    tls_args
     body="$(api /cameras)" || fail "unreachable"
     [[ -n "$body" ]] || fail "unreachable"
     printf '%s' "$body" | jq -c '
@@ -136,13 +195,15 @@ case "${1:-list}" in
   snapshot)
     id="${2:-}"
     [[ -n "$id" ]] || fail "usage: unifi-protect snapshot <camera-id>"
+    check_id "$id"
+    tls_args
     mkdir -p -- "$CACHE_DIR" || fail "cannot write $CACHE_DIR"
 
     # A fresh filename every time. QML's Image caches by URL, so overwriting
     # one path would leave the widget showing the first frame forever; a new
     # name means the source changes and the picture actually updates.
     out="$CACHE_DIR/$id-$(date +%s%3N).jpg"
-    code="$(curl -s -k -m "$SNAPSHOT_TIMEOUT" -H "X-API-KEY: $KEY" \
+    code="$(curl -s "${CURL_TLS[@]}" -m "$SNAPSHOT_TIMEOUT" -H "X-API-KEY: $KEY" \
       -o "$out" -w '%{http_code}' "$API/cameras/$id/snapshot")"
 
     if [[ "$code" != "200" || ! -s "$out" ]]; then
@@ -166,6 +227,8 @@ case "${1:-list}" in
     # rather than looked up so that filing a frame stays one HTTP call.
     name="${3:-}"
     [[ -n "$id" ]] || fail "usage: unifi-protect capture <camera-id> [name]"
+    check_id "$id"
+    tls_args
     mkdir -p -- "$ARCHIVE_DIR" || fail "cannot write $ARCHIVE_DIR"
 
     # There is one bar per monitor and each runs its own copy of the widget,
@@ -196,7 +259,7 @@ case "${1:-list}" in
 
     tmp="$ARCHIVE_DIR/.$id.tmp.jpg"
     out="$ARCHIVE_DIR/$id-$now.jpg"
-    code="$(curl -s -k -m "$SNAPSHOT_TIMEOUT" -H "X-API-KEY: $KEY" \
+    code="$(curl -s "${CURL_TLS[@]}" -m "$SNAPSHOT_TIMEOUT" -H "X-API-KEY: $KEY" \
       -o "$tmp" -w '%{http_code}' "$API/cameras/$id/snapshot")"
 
     if [[ "$code" != "200" || ! -s "$tmp" ]]; then
@@ -234,8 +297,10 @@ case "${1:-list}" in
       viewer="$(viewer_command "$out")"
       [[ -n "$VIEWER" ]] && notify_hints+=(-h "string:omarchy-exec:$viewer")
 
+      # -- because the camera name is Protect's, and a name that opens with a
+      # dash would otherwise be read as an option.
       notify-send -t "$NOTIFY_TIMEOUT" -i "$out" -a "Camera" \
-        "${notify_hints[@]}" \
+        "${notify_hints[@]}" -- \
         "Motion at $name" "$(date '+%H:%M')" 2>/dev/null || true
     fi
 
@@ -262,6 +327,8 @@ case "${1:-list}" in
   stream)
     id="${2:-}"
     [[ -n "$id" ]] || fail "usage: unifi-protect stream <camera-id>"
+    check_id "$id"
+    tls_args
     url="$(api "/cameras/$id/rtsps-stream" | jq -r '.high // .medium // .low // empty')"
     [[ -n "$url" ]] || fail "no stream for camera $id"
 
@@ -278,12 +345,16 @@ case "${1:-list}" in
   live)
     id="${2:-}"
     [[ -n "$id" ]] || fail "usage: unifi-protect live <camera-id>"
+    check_id "$id"
+    tls_args
     url="$(api "/cameras/$id/rtsps-stream" | jq -r '.high // .medium // .low // empty')"
     [[ -n "$url" ]] || fail "no stream for camera $id"
 
     # The gateway serves a self-signed certificate, so certificate checking is
     # the one thing that has to give; the stream itself stays encrypted. mpv's
-    # own --tls-verify only covers https, hence the libavformat option.
+    # own --tls-verify only covers https, hence the libavformat option. Note
+    # that nothing on this connection is the API key: the url Protect just
+    # handed back carries a per-camera stream alias and nothing else.
     exec mpv --title="UniFi camera" \
       --rtsp-transport=tcp --demuxer-lavf-o=tls_verify=0 \
       --profile=low-latency --no-terminal "$url"
@@ -298,9 +369,10 @@ case "${1:-list}" in
     # upgrade with a 404 rather than refusing it, which looks exactly like a
     # missing endpoint. websockets does 1.1, so this is only a trap when
     # testing by hand with curl.
-    export UNIFI_WATCH_KEY="$KEY" UNIFI_WATCH_HOST="$HOST"
+    tls_args
+    export UNIFI_WATCH_KEY="$KEY" UNIFI_WATCH_HOST="$HOST" UNIFI_WATCH_CERT="$CERT_FILE"
     exec python3 -u -c '
-import asyncio, json, os, ssl, sys
+import asyncio, json, os, re, ssl, sys
 
 try:
     import websockets
@@ -315,9 +387,33 @@ key = os.environ["UNIFI_WATCH_KEY"]
 host = os.environ["UNIFI_WATCH_HOST"]
 url = f"wss://{host}/proxy/protect/integration/v1/subscribe/events"
 
-ctx = ssl.create_default_context()
+# The pinned certificate is the only one this will talk to. It is loaded as
+# the trust root rather than compared after the fact, because the key travels
+# in the handshake request: by the time there is a socket to inspect it has
+# already gone out. Hostname checking stays off -- the certificate names the
+# console, not the address -- but with a store holding exactly one certificate,
+# "verified" already means "the one that was pinned".
+#
+# The two verify flags are what make that work against a real console. The
+# gateway signs its own leaf and does not mark it a CA, and OpenSSL will not
+# take a non-CA certificate as a trust anchor: X509_STRICT, which Python turns
+# on by default from 3.13, rejects it outright, and PARTIAL_CHAIN is the flag
+# that says any certificate in the store may anchor a chain. Without both,
+# this fails as "invalid CA certificate" -- a statement about how the
+# certificate was issued, not about the pin.
+#
+# Neither flag loosens what is being checked here. The store holds one
+# certificate; a host presenting any other is still refused, including one
+# that copies the name on this one.
+ctx = ssl.create_default_context(cafile=os.environ["UNIFI_WATCH_CERT"])
 ctx.check_hostname = False
-ctx.verify_mode = ssl.CERT_NONE
+ctx.verify_mode = ssl.CERT_REQUIRED
+ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
+ctx.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
+
+# Same rule as the shell side: an id that is not flat alphanumeric never
+# reaches the widget, which would pass it straight back down as a path.
+ID = re.compile(r"^[A-Za-z0-9]{1,64}$")
 
 
 def emit(obj):
@@ -339,9 +435,12 @@ async def listen():
             kind = item.get("type") or msg.get("type")
             if kind not in ("motion", "smartDetectZone", "smartDetectLine"):
                 continue
+            camera = item.get("camera") or item.get("device")
+            if not isinstance(camera, str) or not ID.match(camera):
+                continue
             emit({
                 "type": "motion",
-                "camera": item.get("camera") or item.get("device"),
+                "camera": camera,
                 "kind": kind,
                 "detections": item.get("smartDetectTypes") or [],
                 "ended": item.get("end") is not None,
@@ -364,6 +463,61 @@ async def main():
 
 asyncio.run(main())
 ' ;;
+
+  trust)
+    # Run once, by hand, before anything else works. Trust-on-first-use: this
+    # looks at whatever is answering on the address right now, shows you its
+    # fingerprint so you can hold it against the one the console shows under
+    # Settings -> System, and files it. From then on that certificate is the
+    # only one the key is ever handed to.
+    #
+    # Human output, not JSON -- nothing in the widget calls this.
+    command -v openssl >/dev/null 2>&1 || {
+      printf 'openssl is needed to pin the certificate\n' >&2; exit 1; }
+
+    # --host may already carry a port, in which case that is the one to look at.
+    target="$HOST"; [[ "$target" == *:* ]] || target="$HOST:443"
+    chain="$(openssl s_client -connect "$target" -showcerts </dev/null 2>/dev/null \
+      | sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p')"
+    [[ -n "$chain" ]] || {
+      printf 'cannot reach https://%s/ to read its certificate\n' "$target" >&2; exit 1; }
+
+    detail() { printf '%s' "$chain" | openssl x509 -noout "$@" 2>/dev/null | cut -d= -f2-; }
+    new_fp="$(detail -fingerprint -sha256)"
+    [[ -n "$new_fp" ]] || { printf 'that is not a certificate\n' >&2; exit 1; }
+
+    printf 'Gateway    https://%s/\n' "$target"
+    printf 'Subject    %s\n' "$(detail -subject)"
+    printf 'Issuer     %s\n' "$(detail -issuer)"
+    printf 'Expires    %s\n' "$(detail -enddate)"
+    printf 'SHA-256    %s\n\n' "$new_fp"
+
+    if [[ -r "$CERT_FILE" ]]; then
+      old_fp="$(openssl x509 -in "$CERT_FILE" -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2-)"
+      if [[ -n "$old_fp" && "$old_fp" != "$new_fp" ]]; then
+        printf 'This is NOT the certificate currently pinned:\n'
+        printf '  pinned   %s\n\n' "$old_fp"
+        printf 'A console that was reset or reinstalled explains this. So does\n'
+        printf 'something else answering on the address. Check before you agree.\n\n'
+      fi
+    fi
+
+    printf 'Compare that fingerprint against the console itself before you agree:\n'
+    printf 'trusting it here is the whole of what keeps your API key from being\n'
+    printf 'handed to anything else that answers on this address.\n\n'
+
+    if [[ -t 0 ]]; then
+      read -r -p 'Pin this certificate? [y/N] ' answer
+      [[ "$answer" == [yY]* ]] || { printf 'Nothing pinned.\n' >&2; exit 1; }
+    fi
+
+    mkdir -p -- "${CERT_FILE%/*}" || {
+      printf 'cannot write %s\n' "${CERT_FILE%/*}" >&2; exit 1; }
+    (umask 077; printf '%s\n' "$chain" > "$CERT_FILE") || {
+      printf 'cannot write %s\n' "$CERT_FILE" >&2; exit 1; }
+
+    printf 'Pinned to %s\n' "$CERT_FILE"
+    ;;
 
   *)
     fail "unknown command: $1"
