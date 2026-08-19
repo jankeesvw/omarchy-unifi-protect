@@ -11,6 +11,8 @@
 #   unifi-protect live <id>        # opens the live RTSPS stream in mpv
 #   unifi-protect watch            # streams motion as NDJSON, one event per line
 #   unifi-protect trust            # pins the gateway's certificate; run once
+#   unifi-protect setup            # installs websockets in a venv, if the
+#                                  # system has no package for it
 #
 # Options, before the command:
 #   --host <host>        gateway address        (default 192.168.1.1)
@@ -71,6 +73,10 @@ ARCHIVE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/unifi-protect/events"
 KEY_FILE="${UNIFI_API_KEY_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/unifi-protect/api-key}"
 # The gateway's certificate, as pinned by `unifi-protect trust`.
 CERT_FILE="${UNIFI_CERT_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/unifi-protect/gateway.pem}"
+# Where `unifi-protect setup` puts websockets when the system has no package
+# for it. Only ever written by setup; watch reads it and nothing else.
+VENV_DIR="${UNIFI_VENV:-${XDG_DATA_HOME:-$HOME/.local/share}/unifi-protect/venv}"
+VENV_PYTHON="$VENV_DIR/bin/python"
 # Seconds within which a second request for the same camera is answered with
 # the frame already on disk.
 ARCHIVE_DEBOUNCE=15
@@ -371,30 +377,22 @@ case "${1:-list}" in
     # testing by hand with curl.
     tls_args
     export UNIFI_WATCH_KEY="$KEY" UNIFI_WATCH_HOST="$HOST" UNIFI_WATCH_CERT="$CERT_FILE"
-    # python3 plus the system websockets package, or a user venv created on
-    # first watch. A fresh Omarchy install has python3 but not
-    # python-websockets, and the icon should still light up without sudo.
+    # The system interpreter if it has websockets, otherwise the venv from
+    # `unifi-protect setup` if that is there. Nothing is installed from here:
+    # this runs on its own when the shell starts, and a plugin that quietly
+    # fetches and executes a package off the network at that moment is asking
+    # for a trust it was never given. Without either, python3 is handed the
+    # script anyway so the import error below is what the widget hears.
     watch_python() {
       if python3 -c 'import websockets' >/dev/null 2>&1; then
         printf '%s' python3
         return
       fi
-
-      local venv="${XDG_DATA_HOME:-$HOME/.local/share}/unifi-protect/venv"
-      local py="$venv/bin/python"
-      if [[ -x $py ]] && "$py" -c 'import websockets' >/dev/null 2>&1; then
-        printf '%s' "$py"
+      if [[ -x "$VENV_PYTHON" ]] && "$VENV_PYTHON" -c 'import websockets' >/dev/null 2>&1; then
+        printf '%s' "$VENV_PYTHON"
         return
       fi
-
-      python3 -m venv "$venv" >/dev/null 2>&1 || return 1
-      if command -v uv >/dev/null 2>&1; then
-        uv pip install --python "$py" --quiet websockets >/dev/null 2>&1 || return 1
-      else
-        "$py" -m pip install --quiet websockets >/dev/null 2>&1 || return 1
-      fi
-      "$py" -c 'import websockets' >/dev/null 2>&1 || return 1
-      printf '%s' "$py"
+      return 1
     }
     WATCH_PY="$(watch_python || true)"
     [[ -n $WATCH_PY ]] || WATCH_PY=python3
@@ -406,7 +404,7 @@ try:
 except ImportError:
     print(json.dumps({
         "type": "error",
-        "error": "the python websockets package is missing; motion events are off",
+        "error": "no python websockets package; run `unifi-protect setup` or install python-websockets. Motion events are off",
     }), flush=True)
     sys.exit(1)
 
@@ -544,6 +542,56 @@ asyncio.run(main())
       printf 'cannot write %s\n' "$CERT_FILE" >&2; exit 1; }
 
     printf 'Pinned to %s\n' "$CERT_FILE"
+    ;;
+
+  setup)
+    # Motion needs the python websockets package. The tidy way is the distro
+    # package; this is for a machine that has no package for it and no wish to
+    # hand the plugin sudo.
+    #
+    # Run by hand, and it says what it is doing. That is the difference that
+    # matters: installing a package off the network is a thing a person agrees
+    # to, not a thing a bar widget does on its own the first time it starts.
+    #
+    # Human output, not JSON.
+    if python3 -c 'import websockets' >/dev/null 2>&1; then
+      printf 'The system python already has websockets. Nothing to do.\n'
+      exit 0
+    fi
+
+    if [[ -x "$VENV_PYTHON" ]] && "$VENV_PYTHON" -c 'import websockets' >/dev/null 2>&1; then
+      printf 'Already set up: %s\n' "$VENV_PYTHON"
+      exit 0
+    fi
+
+    printf 'The system python has no websockets package, which is what motion\n'
+    printf 'events need. On Arch the tidy way is:\n\n'
+    printf '    sudo pacman -S --needed python-websockets\n\n'
+    printf 'Otherwise this installs it from PyPI into a virtualenv of your own:\n\n'
+    printf '    %s\n\n' "$VENV_DIR"
+    printf 'Nothing outside that directory is touched, and no privileges are asked\n'
+    printf 'for. It is removed by deleting the directory.\n\n'
+
+    if [[ -t 0 ]]; then
+      read -r -p 'Create it and install websockets from PyPI? [y/N] ' answer
+      [[ "$answer" == [yY]* ]] || { printf 'Nothing installed.\n' >&2; exit 1; }
+    fi
+
+    python3 -m venv "$VENV_DIR" || {
+      printf 'could not create %s\n' "$VENV_DIR" >&2; exit 1; }
+
+    if command -v uv >/dev/null 2>&1; then
+      uv pip install --python "$VENV_PYTHON" websockets || {
+        printf 'could not install websockets\n' >&2; exit 1; }
+    else
+      "$VENV_PYTHON" -m pip install websockets || {
+        printf 'could not install websockets\n' >&2; exit 1; }
+    fi
+
+    "$VENV_PYTHON" -c 'import websockets' >/dev/null 2>&1 || {
+      printf 'websockets still will not import from %s\n' "$VENV_PYTHON" >&2; exit 1; }
+
+    printf '\nDone. Motion events work from the next shell restart.\n'
     ;;
 
   *)

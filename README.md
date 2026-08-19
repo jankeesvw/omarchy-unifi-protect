@@ -210,21 +210,29 @@ Omarchy with `omarchy-shell` (the Quickshell-based bar), and:
 | | |
 |---|---|
 | `curl`, `jq` | talking to Protect |
-| `python3` + [`websockets`](https://pypi.org/project/websockets/) | motion events. The system package is used if present; otherwise a user venv is created on first watch, so a fresh install does not need sudo. Without either, everything works except the icon lighting up. |
+| `python3` + [`websockets`](https://pypi.org/project/websockets/) | motion events. The system package is used if present; otherwise `unifi-protect setup` puts it in a venv of your own, no sudo needed. Without either, everything works except the icon lighting up. |
 | `imagemagick` | shrinking archived frames. Without it they are stored full size. |
 | `libnotify` | the notification on motion |
 | `mpv` | only for `unifi-protect live` |
 
-On Arch, the tidy way is the system package. Omarchy's `omarchy pkg add`
-installs it if you want that; `watch` will also create
-`~/.local/share/unifi-protect/venv` and put `websockets` there the first
-time it needs it.
+On Arch, the tidy way is the system package:
 
 ```bash
 omarchy pkg add python-websockets
 # or
 sudo pacman -S --needed curl jq python python-websockets imagemagick libnotify mpv
 ```
+
+On a machine with no package for it, and no wish to hand a bar widget sudo:
+
+```bash
+~/.config/omarchy/plugins/jankeesvw.unifi-protect/bin/unifi-protect setup
+```
+
+That installs `websockets` from PyPI into `~/.local/share/unifi-protect/venv`
+and touches nothing else. It asks first, and it is the only thing here that
+installs anything — the widget never fetches a package on its own while it is
+running. Delete the directory to undo it.
 
 Chain and hostname checking are off for calls to the console — its
 certificate names the console, not the address you reach it on, and nothing on
