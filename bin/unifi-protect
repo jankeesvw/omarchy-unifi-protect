@@ -180,6 +180,16 @@ private_dir() {
   fi
 }
 
+# Protect answers the stream call with rtsps://<host>:<port>/<alias>, and both
+# commands that use it hand the answer to something that reads more than a URL
+# out of it: mpv takes a leading dash as an option, and the widget is given the
+# alias as part of a path. A value that is not shaped like that stream URL is
+# refused rather than repaired -- as with a camera id, it is not a URL in need
+# of cleaning up, it is a sign that what answered is not Protect.
+valid_stream_url() {
+  [[ "$1" =~ ^rtsps?://[A-Za-z0-9.:_-]+/[A-Za-z0-9._~-]+(\?[A-Za-z0-9._~=\&-]*)?$ ]]
+}
+
 KEY="$(key)"
 [[ -n "$KEY" ]] || fail "no API key: set UNIFI_API_KEY or write one to $KEY_FILE"
 
@@ -373,6 +383,7 @@ case "${1:-list}" in
     tls_args
     url="$(api "/cameras/$id/rtsps-stream" | jq -r '.high // .medium // .low // empty')"
     [[ -n "$url" ]] || fail "no stream for camera $id"
+    valid_stream_url "$url" || fail "not a stream url"
 
     # Protect hands out an rtsps:// URL on 7441, secured with the gateway's
     # self-signed certificate. Qt Multimedia gives no way to skip that check,
@@ -391,15 +402,22 @@ case "${1:-list}" in
     tls_args
     url="$(api "/cameras/$id/rtsps-stream" | jq -r '.high // .medium // .low // empty')"
     [[ -n "$url" ]] || fail "no stream for camera $id"
+    valid_stream_url "$url" || fail "not a stream url"
 
     # The gateway serves a self-signed certificate, so certificate checking is
     # the one thing that has to give; the stream itself stays encrypted. mpv's
     # own --tls-verify only covers https, hence the libavformat option. Note
     # that nothing on this connection is the API key: the url Protect just
     # handed back carries a per-camera stream alias and nothing else.
+    #
+    # -- because everything after it is a file to play. The URL is Protect's
+    # answer, not ours, and mpv reads a leading dash as an option -- one of
+    # which loads a script off disk. The check above already refuses anything
+    # that is not a stream URL; the terminator means a hole in that pattern
+    # still does not become an argument list.
     exec mpv --title="UniFi camera" \
       --rtsp-transport=tcp --demuxer-lavf-o=tls_verify=0 \
-      --profile=low-latency --no-terminal "$url"
+      --profile=low-latency --no-terminal -- "$url"
     ;;
 
   watch)
