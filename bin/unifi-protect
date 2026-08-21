@@ -42,6 +42,12 @@
 
 set -uo pipefail
 
+# Frames are pictures of the inside of your house, and the archive keeps them
+# for as long as you leave it there. Nothing written below is meant to be read
+# by another account on this machine, so the umask says so once rather than
+# every mkdir and every redirect repeating it.
+umask 077
+
 HOST="${UNIFI_HOST:-192.168.1.1}"
 RTSP_PORT="${UNIFI_RTSP_PORT:-7447}"
 ARCHIVE_KEEP="${UNIFI_ARCHIVE_KEEP:-60}"
@@ -65,7 +71,12 @@ done
 API="https://$HOST/proxy/protect/integration/v1"
 TIMEOUT=8
 SNAPSHOT_TIMEOUT=20
-CACHE_DIR="${XDG_RUNTIME_DIR:-/tmp}/unifi-protect"
+# Where a frame waits for the widget to load it. XDG_RUNTIME_DIR is already a
+# directory of our own, mode 700 and cleaned up at logout. /tmp is not: it is
+# shared, world-writable ground, so the fallback takes a name of its own per
+# user and is checked before it is written to -- see private_dir.
+CACHE_DIR="${XDG_RUNTIME_DIR:+$XDG_RUNTIME_DIR/unifi-protect}"
+CACHE_DIR="${CACHE_DIR:-/tmp/unifi-protect-$(id -u)}"
 # The archive outlives a reboot, so it lives in state rather than runtime.
 ARCHIVE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/unifi-protect/events"
 KEY_FILE="${UNIFI_API_KEY_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/unifi-protect/api-key}"
@@ -138,6 +149,37 @@ check_id() {
   valid_id "${1:-}" || fail "not a camera id"
 }
 
+# Makes a directory that is ours, and refuses one that is not.
+#
+# In a shared directory anybody can get there first. A symlink left under the
+# name we are about to use would have curl write the frame wherever it points,
+# and a directory left readable would let the snapshots be read by whoever
+# made it. `mkdir -p` is no defence against either: it follows a symlink to a
+# directory and reports success, and it leaves the mode of a directory that
+# already existed alone.
+#
+# So the check comes after, and it looks at the path itself rather than at
+# what it resolves to: a symlink here is refused outright instead of being
+# followed to something that would pass.
+private_dir() {
+  local dir="$1" owner mode
+  mkdir -p -m 700 -- "$dir" 2>/dev/null
+  [[ -d "$dir" && ! -L "$dir" ]] || return 1
+  owner="$(stat -c '%u' -- "$dir" 2>/dev/null)" || return 1
+  [[ "$owner" == "$(id -u)" ]] || return 1
+
+  # An archive filed by an earlier version of this script is still sitting
+  # there readable, and closing the door now does nothing about what is
+  # already inside. So the first run that finds it open puts both right --
+  # once, because after that the mode already says 700 and there is nothing
+  # to walk.
+  mode="$(stat -c '%a' -- "$dir" 2>/dev/null)"
+  if [[ "$mode" != "700" ]]; then
+    chmod 700 -- "$dir" 2>/dev/null || return 1
+    find "$dir" -maxdepth 1 -type f -exec chmod 600 -- {} + 2>/dev/null
+  fi
+}
+
 KEY="$(key)"
 [[ -n "$KEY" ]] || fail "no API key: set UNIFI_API_KEY or write one to $KEY_FILE"
 
@@ -197,7 +239,7 @@ case "${1:-list}" in
     [[ -n "$id" ]] || fail "usage: unifi-protect snapshot <camera-id>"
     check_id "$id"
     tls_args
-    mkdir -p -- "$CACHE_DIR" || fail "cannot write $CACHE_DIR"
+    private_dir "$CACHE_DIR" || fail "$CACHE_DIR is not a directory of ours"
 
     # A fresh filename every time. QML's Image caches by URL, so overwriting
     # one path would leave the widget showing the first frame forever; a new
@@ -229,7 +271,7 @@ case "${1:-list}" in
     [[ -n "$id" ]] || fail "usage: unifi-protect capture <camera-id> [name]"
     check_id "$id"
     tls_args
-    mkdir -p -- "$ARCHIVE_DIR" || fail "cannot write $ARCHIVE_DIR"
+    private_dir "$ARCHIVE_DIR" || fail "$ARCHIVE_DIR is not a directory of ours"
 
     # There is one bar per monitor and each runs its own copy of the widget,
     # so the same motion asks for a capture more than once. Whoever asks
