@@ -463,6 +463,18 @@ Panel {
     return c ? c.name : "?"
   }
 
+  // Qt decides for itself whether a string is markup, and a Text or tooltip in
+  // that mode fetches `<img src="http://...">` for real, from inside the shell
+  // process. Camera names, detection types and error text are all Protect's
+  // words rather than ours, so none of them is ours to vouch for. The panel's
+  // own Text elements are pinned to PlainText; the bar tooltip and the section
+  // header are the shell's components and not ours to set, so anything heading
+  // that way has its angle brackets taken off first -- without a `<` there is
+  // nothing for Qt to mistake for a tag.
+  function plain(s) {
+    return String(s === undefined || s === null ? "" : s).replace(/[<>]/g, "")
+  }
+
   // Lets the icon be exercised without waiting for a person to walk past a
   // camera:  omarchy-shell jankeesvw.unifi-protect.test motion "Front door"
   // The name is matched against the camera list, so a typo does nothing
@@ -534,7 +546,9 @@ Panel {
     dimmed: root.motionId === "" || !root.reachable
     tooltipText: !root.reachable
       ? "Protect unreachable"
-      : (root.motionCamera ? "Motion at " + root.motionCamera.name : "Cameras")
+      : (root.motionCamera
+         ? root.plain("Motion at " + root.motionCamera.name)
+         : "Cameras")
 
     onPressed: function(b) {
       if (b === Qt.MiddleButton) {
@@ -551,6 +565,7 @@ Panel {
 
   Text {
     id: label
+    textFormat: Text.PlainText
     anchors.left: button.right
     anchors.leftMargin: Style.space(2)
     anchors.verticalCenter: parent.verticalCenter
@@ -595,9 +610,9 @@ Panel {
       PanelSectionHeader {
         width: parent.width
         text: root.reviewing
-          ? (root.nameOf(root.reviewCamera).toUpperCase() + "  \u00b7  "
-             + root.agoLongOf(root.reviewTs))
-          : (root.selected ? root.selected.name.toUpperCase() : "CAMERAS")
+          ? root.plain(root.nameOf(root.reviewCamera).toUpperCase() + "  \u00b7  "
+                       + root.agoLongOf(root.reviewTs))
+          : (root.selected ? root.plain(root.selected.name.toUpperCase()) : "CAMERAS")
         foreground: root.foreground
         fontFamily: root.fontFamily
       }
@@ -647,6 +662,7 @@ Panel {
         }
 
         Text {
+          textFormat: Text.PlainText
           anchors.centerIn: parent
           visible: !mainImage.visible && !video.visible
           text: root.reachable ? "Connecting" : "Protect unreachable"
@@ -679,6 +695,7 @@ Panel {
 
           Text {
             id: backLabel
+            textFormat: Text.PlainText
             anchors.centerIn: parent
             text: "\u2190 live"
             font.family: root.fontFamily
@@ -708,6 +725,7 @@ Panel {
 
           Text {
             id: motionLabel
+            textFormat: Text.PlainText
             anchors.centerIn: parent
             text: "motion"
             font.family: root.fontFamily
@@ -752,6 +770,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               anchors.left: parent.left
               anchors.bottom: parent.bottom
               anchors.margins: Style.space(4)
@@ -819,6 +838,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               anchors.left: parent.left
               anchors.bottom: parent.bottom
               anchors.margins: Style.space(4)
@@ -842,6 +862,7 @@ Panel {
       }
 
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         visible: !root.hasCameras
         text: root.reachable ? "No cameras found" : "Protect unreachable"
