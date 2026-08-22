@@ -36,8 +36,11 @@ Panel {
 
   // The script that does the talking sits next to this file, so the plugin
   // runs from wherever it was installed without putting anything on $PATH.
-  readonly property string script:
-    Qt.resolvedUrl("bin/unifi-protect").toString().replace(/^file:\/\//, "")
+  readonly property string script: {
+    var url = Qt.resolvedUrl("bin/unifi-protect").toString()
+    var path = url.replace(/^file:\/\/(localhost)?/, "")
+    try { return decodeURIComponent(path) } catch (e) { return path }
+  }
 
   // Address of the console running Protect. Everything the script needs to
   // reach it is passed on the command line rather than read from the
@@ -217,14 +220,40 @@ Panel {
     }
   }
 
+  function refreshCameras() {
+    if (!listProc.running) listProc.running = true
+  }
+
+  // The bar injects settings after this widget is constructed. A list that
+  // fires on start talks to the default gateway, which is not where a fresh
+  // console lives. Relist when the real host arrives, and restart the
+  // websocket so it is not left subscribed to the wrong address.
+  onHostChanged: {
+    root.refreshCameras()
+    if (watchProc.running) {
+      watchProc.running = false
+      watchProc.running = true
+    }
+  }
+
   // The camera list barely changes, so this is about noticing one that was
   // added or unplugged, not about keeping up with anything.
   Timer {
     interval: 600000
     running: true
     repeat: true
-    triggeredOnStart: true
-    onTriggered: if (!listProc.running) listProc.running = true
+    triggeredOnStart: false
+    onTriggered: root.refreshCameras()
+  }
+
+  // Wait a tick for settings to land, then list. Without this a host that
+  // happens to be the default never trips onHostChanged and the icon stays
+  // dim until the ten-minute timer.
+  Timer {
+    interval: 150
+    running: true
+    repeat: false
+    onTriggered: root.refreshCameras()
   }
 
   // --------------------------------------------------------------- snapshots
@@ -500,6 +529,17 @@ Panel {
       root.motionId = ""
       motionTimer.stop()
       return "off"
+    }
+
+    function status(): string {
+      return JSON.stringify({
+        host: root.host,
+        script: root.script,
+        reachable: root.reachable,
+        cameraCount: root.cameras.length,
+        cameras: root.cameras,
+        selectedId: root.selectedId
+      })
     }
   }
 
