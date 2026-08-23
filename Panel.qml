@@ -33,6 +33,8 @@ Panel {
   ipcTarget: "jankeesvw.unifi-protect"
 
   readonly property string iconCamera: "\uf03d"
+  readonly property string iconGear: "\u2699"
+  readonly property string iconBack: "\u2190"
 
   // The script that does the talking sits next to this file, so the plugin
   // runs from wherever it was installed without putting anything on $PATH.
@@ -76,6 +78,14 @@ Panel {
   property var cameras: []
   property bool reachable: true
   property string selectedId: ""
+  // "cameras" or "settings". Setup that is still missing a key lands on
+  // settings instead of the dead "Protect unreachable" text.
+  property string view: "settings"
+  property bool hasKey: false
+  readonly property bool needsSetup: !hasKey
+  // True only after the user opened settings on purpose, so a successful
+  // status check does not yank them back to cameras mid-edit.
+  property bool userWantsSettings: false
   // Camera id -> path of the newest frame on disk.
   property var frames: ({})
   // Camera id -> rtsp url. Fetched once per camera and kept: the url only
@@ -224,7 +234,10 @@ Panel {
     running: true
     repeat: true
     triggeredOnStart: true
-    onTriggered: if (!listProc.running) listProc.running = true
+    onTriggered: {
+      if (!listProc.running) listProc.running = true
+      root.refreshStatus()
+    }
   }
 
   // --------------------------------------------------------------- snapshots
@@ -267,7 +280,7 @@ Panel {
   Timer {
     id: mainTimer
     interval: root.refreshMs
-    running: root.opened && root.selectedId !== ""
+    running: root.opened && root.view === "cameras" && root.selectedId !== ""
       && player.playbackState !== MediaPlayer.PlayingState
     repeat: true
     triggeredOnStart: true
@@ -281,7 +294,7 @@ Panel {
     id: thumbTimer
     property int cursor: 0
     interval: 1500
-    running: root.opened && root.cameras.length > 1
+    running: root.opened && root.view === "cameras" && root.cameras.length > 1
     repeat: true
     triggeredOnStart: true
     onTriggered: {
@@ -297,6 +310,9 @@ Panel {
   // the selected camera is refetched immediately and the rest follow.
   onOpenedChanged: {
     if (opened) {
+      if (root.needsSetup) root.showSettings()
+      else if (!root.userWantsSettings) root.showCameras()
+      root.refreshStatus()
       thumbTimer.cursor = 0
       root.grab(mainShot, root.selectedId)
       root.resolveStream(root.selectedId)
@@ -475,6 +491,97 @@ Panel {
     return String(s === undefined || s === null ? "" : s).replace(/[<>]/g, "")
   }
 
+  function persistSettings(values) {
+    var entry = { id: root.moduleName }
+    for (var existing in root.settings)
+      if (existing !== "id") entry[existing] = root.settings[existing]
+    for (var key in values) entry[key] = values[key]
+    root.settings = entry
+    if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function")
+      root.bar.shell.updateEntryInline(root.moduleName, entry)
+  }
+
+  function saveHost(value) {
+    var next = String(value === undefined || value === null ? "" : value).trim()
+    if (next === "") next = "192.168.1.1"
+    if (next !== root.host) {
+      persistSettings({ host: next })
+      refreshStatus()
+      if (!listProc.running) listProc.running = true
+      restartWatch()
+    }
+    if (hostField) hostField.text = next
+  }
+
+  function saveKey() {
+    var k = keyField ? String(keyField.text).trim() : ""
+    if (k === "" || setKeyProc.running) return
+    setKeyProc.pending = k
+    setKeyProc.command = root.cmd(["set-key"])
+    setKeyProc.running = true
+  }
+
+  function pasteKey() {
+    if (pasteKeyProc.running) return
+    pasteKeyProc.command = ["wl-paste", "--no-newline", "--type", "text"]
+    pasteKeyProc.running = true
+  }
+
+  function focusField(field) {
+    if (field) field.forceActiveFocus()
+  }
+
+  function refreshStatus() {
+    if (statusProc.running) return
+    statusProc.command = root.cmd(["status"])
+    statusProc.running = true
+  }
+
+  function refreshAfterCredential() {
+    refreshStatus()
+    if (!listProc.running) listProc.running = true
+    restartWatch()
+  }
+
+  function restartWatch() {
+    watchProc.running = false
+    Qt.callLater(function() { watchProc.running = true })
+  }
+
+  function showSettings() {
+    view = "settings"
+    if (hostField) hostField.text = root.host
+    Qt.callLater(function() { root.focusField(keyField) })
+  }
+
+  function showCameras() {
+    userWantsSettings = false
+    view = "cameras"
+  }
+
+  function toggleAlertCamera(name) {
+    var want = String(name).toLowerCase()
+    var allOn = alertCameras.length === 0
+    var checked = []
+    for (var i = 0; i < cameras.length; i++) {
+      var n = String(cameras[i].name)
+      var on = allOn
+      if (!allOn) {
+        on = false
+        for (var j = 0; j < alertCameras.length; j++) {
+          if (alertCameras[j] === n.toLowerCase()) { on = true; break }
+        }
+      }
+      if (n.toLowerCase() === want) on = !on
+      if (on) checked.push(n)
+    }
+    var value
+    if (checked.length === 0) value = "\u2014"
+    else if (checked.length === cameras.length) value = ""
+    else value = checked.join(", ")
+    persistSettings({ alertCameras: value })
+  }
+
   // Lets the icon be exercised without waiting for a person to walk past a
   // camera:  omarchy-shell jankeesvw.unifi-protect.test motion "Front door"
   // The name is matched against the camera list, so a typo does nothing
@@ -527,6 +634,74 @@ Panel {
     root.close()
   }
 
+  // ----------------------------------------------------------------- setup
+
+  Process {
+    id: statusProc
+    stdout: StdioCollector {
+      onStreamFinished: {
+        try {
+          var data = JSON.parse(text)
+          root.hasKey = data.hasKey === true
+          if (root.opened && root.needsSetup) {
+            if (root.view !== "settings") root.showSettings()
+          } else if (root.opened && !root.needsSetup && !root.userWantsSettings) {
+            root.showCameras()
+          }
+        } catch (e) {
+        }
+      }
+    }
+  }
+
+  Process {
+    id: setKeyProc
+    stdinEnabled: true
+    property string pending: ""
+    stdout: StdioCollector {
+      onStreamFinished: {
+        try {
+          var data = JSON.parse(text)
+          if (data.ok === true) {
+            if (keyField) keyField.text = ""
+            root.hasKey = true
+            root.refreshAfterCredential()
+          }
+        } catch (e) {
+        }
+      }
+    }
+    onStarted: {
+      write(pending + "\n")
+      pending = ""
+      stdinEnabled = false
+    }
+    onExited: {
+      pending = ""
+      stdinEnabled = true
+    }
+  }
+
+  Process {
+    id: pasteKeyProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var t = String(text).replace(/^\s+|\s+$/g, "")
+        if (t !== "" && keyField) {
+          keyField.text = t
+          root.focusField(keyField)
+        }
+      }
+    }
+  }
+
+  readonly property int settingsBodyMax: {
+    var avail = popup.availableCardHeight
+    if (!(avail > 0)) return Style.space(520)
+    return Math.max(Style.space(200), avail - Style.space(100))
+  }
+
   // --------------------------------------------------------------------- bar
 
   BarIconButton {
@@ -543,12 +718,14 @@ Panel {
     // own opacity and puts a Behavior on it, so a second binding on the same
     // property fights the animation instead of replacing it.
     active: root.motionId !== ""
-    dimmed: root.motionId === "" || !root.reachable
-    tooltipText: !root.reachable
-      ? "Protect unreachable"
-      : (root.motionCamera
-         ? root.plain("Motion at " + root.motionCamera.name)
-         : "Cameras")
+    dimmed: root.motionId === "" || !root.reachable || root.needsSetup
+    tooltipText: root.needsSetup
+      ? "Needs setup"
+      : (!root.reachable
+         ? "Protect unreachable"
+         : (root.motionCamera
+            ? root.plain("Motion at " + root.motionCamera.name)
+            : "Cameras"))
 
     onPressed: function(b) {
       if (b === Qt.MiddleButton) {
@@ -587,35 +764,102 @@ Panel {
 
   // ------------------------------------------------------------------- panel
 
-  PopupCard {
+  // KeyboardPanel, not PopupCard: xdg-popups in this shell only get keys
+  // after a click routes focus through the parent surface, which is why
+  // the API key field would not take a left-click. Layer-shell primes
+  // focus the same way the clock and network panels do.
+  KeyboardPanel {
     id: popup
     anchorItem: button
     bar: root.bar
     owner: root
     open: root.opened
-    // Click, not hover: a panel that pulls three camera feeds should open
-    // because you meant it, not because the cursor crossed the bar.
-    triggerMode: "click"
+    focusTarget: keyCatcher
     // Wide enough that the live view is worth looking at rather than merely
     // present. `fittedContentWidth` caps it to the screen, so a number too
     // large for a small display is trimmed rather than clipped.
     contentWidth: popup.fittedContentWidth(Style.space(root.panelWidth))
     contentHeight: popup.fittedContentHeight(content.implicitHeight)
 
-    Column {
-      id: content
+    PanelKeyCatcher {
+      id: keyCatcher
       anchors.fill: parent
-      spacing: Style.space(8)
+      blocked: (hostField && hostField.activeFocus) || (keyField && keyField.activeFocus)
+      onCloseRequested: root.close()
+      onTabRequested: function(direction) { root.switchPanel(direction) }
 
-      PanelSectionHeader {
+      Column {
+        id: content
+        anchors.fill: parent
+        spacing: Style.space(8)
+
+      Item {
         width: parent.width
-        text: root.reviewing
-          ? root.plain(root.nameOf(root.reviewCamera).toUpperCase() + "  \u00b7  "
-                       + root.agoLongOf(root.reviewTs))
-          : (root.selected ? root.plain(root.selected.name.toUpperCase()) : "CAMERAS")
-        foreground: root.foreground
-        fontFamily: root.fontFamily
+        visible: root.view === "cameras"
+        height: Math.max(camerasHeader.implicitHeight, gearBtn.implicitHeight)
+
+        PanelSectionHeader {
+          id: camerasHeader
+          anchors.left: parent.left
+          anchors.right: gearBtn.left
+          anchors.rightMargin: Style.space(8)
+          anchors.verticalCenter: parent.verticalCenter
+          text: root.reviewing
+            ? root.plain(root.nameOf(root.reviewCamera).toUpperCase() + "  \u00b7  "
+                         + root.agoLongOf(root.reviewTs))
+            : (root.selected ? root.plain(root.selected.name.toUpperCase()) : "CAMERAS")
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+        }
+
+        PanelActionButton {
+          id: gearBtn
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          iconText: root.iconGear
+          tooltipText: "Settings"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          onClicked: {
+            root.userWantsSettings = true
+            root.showSettings()
+          }
+        }
       }
+
+      Item {
+        width: parent.width
+        visible: root.view === "settings"
+        height: Math.max(settingsHeader.implicitHeight, backBtn.implicitHeight)
+
+        PanelActionButton {
+          id: backBtn
+          anchors.left: parent.left
+          anchors.verticalCenter: parent.verticalCenter
+          iconText: root.iconBack
+          tooltipText: "Back"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          onClicked: root.showCameras()
+        }
+
+        PanelSectionHeader {
+          id: settingsHeader
+          anchors.left: backBtn.right
+          anchors.leftMargin: Style.space(8)
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          text: "SETTINGS"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+        }
+      }
+
+      Column {
+        id: camerasView
+        visible: root.view === "cameras"
+        width: parent.width
+        spacing: Style.space(8)
 
       // Large view of the selected camera.
       Rectangle {
@@ -649,7 +893,7 @@ Panel {
         MediaPlayer {
           id: player
           videoOutput: video
-          source: root.opened && !root.reviewing ? root.selectedStream : ""
+          source: root.opened && root.view === "cameras" && !root.reviewing ? root.selectedStream : ""
           // No AudioOutput is attached on purpose: without one Qt plays the
           // video and drops the audio track, which is what a bar panel wants.
 
@@ -665,7 +909,7 @@ Panel {
           textFormat: Text.PlainText
           anchors.centerIn: parent
           visible: !mainImage.visible && !video.visible
-          text: root.reachable ? "Connecting" : "Protect unreachable"
+          text: root.needsSetup ? "Needs setup" : (root.reachable ? "Connecting" : "Protect unreachable")
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           color: root.foreground
@@ -865,13 +1109,207 @@ Panel {
         textFormat: Text.PlainText
         width: parent.width
         visible: !root.hasCameras
-        text: root.reachable ? "No cameras found" : "Protect unreachable"
+        text: root.needsSetup ? "Needs setup" : (root.reachable ? "No cameras found" : "Protect unreachable")
         horizontalAlignment: Text.AlignHCenter
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
         color: root.foreground
         opacity: 0.6
       }
+      }
+
+      Flickable {
+        id: settingsFlick
+        visible: root.view === "settings"
+        width: parent.width
+        height: Math.min(settingsCol.implicitHeight, root.settingsBodyMax)
+        contentWidth: width
+        contentHeight: settingsCol.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        flickableDirection: Flickable.VerticalFlick
+        interactive: contentHeight > height
+        pressDelay: 200
+
+        Column {
+          id: settingsCol
+          width: settingsFlick.width
+          spacing: Style.space(10)
+
+          Text {
+            visible: root.needsSetup
+            width: parent.width
+            wrapMode: Text.WordWrap
+            textFormat: Text.PlainText
+            text: "Needs an API key before it can talk to Protect."
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            color: root.foreground
+          }
+
+          PanelSectionHeader {
+            width: parent.width
+            text: "CONSOLE"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+
+          TextField {
+            id: hostField
+            width: parent.width
+            text: root.host
+            placeholderText: "192.168.1.1"
+            foreground: root.foreground
+            font.family: root.fontFamily
+            onEditingFinished: root.saveHost(text)
+            onAccepted: root.saveHost(text)
+
+            MouseArea {
+              anchors.fill: parent
+              enabled: !hostField.activeFocus
+              cursorShape: Qt.IBeamCursor
+              propagateComposedEvents: true
+              onPressed: function(mouse) {
+                root.focusField(hostField)
+                mouse.accepted = false
+              }
+            }
+          }
+
+          Text {
+            width: parent.width
+            wrapMode: Text.WordWrap
+            textFormat: Text.PlainText
+            text: "Address of the console running Protect, without the scheme."
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            color: root.foreground
+            opacity: 0.6
+          }
+
+          PanelSectionHeader {
+            width: parent.width
+            text: "API KEY"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+
+          Row {
+            width: parent.width
+            spacing: Style.space(6)
+
+            Item {
+              width: parent.width - saveKeyBtn.implicitWidth - parent.spacing
+              height: Math.max(keyField.implicitHeight, pasteKeyBtn.implicitHeight)
+
+              TextField {
+                id: keyField
+                anchors.fill: parent
+                password: true
+                placeholderText: root.hasKey ? "Key on file" : "Paste API key"
+                foreground: root.foreground
+                font.family: root.fontFamily
+                rightPadding: pasteKeyBtn.implicitWidth + Style.space(10)
+                onAccepted: root.saveKey()
+
+                MouseArea {
+                  anchors.fill: parent
+                  anchors.rightMargin: pasteKeyBtn.width + Style.space(4)
+                  enabled: !keyField.activeFocus
+                  cursorShape: Qt.IBeamCursor
+                  propagateComposedEvents: true
+                  onPressed: function(mouse) {
+                    root.focusField(keyField)
+                    mouse.accepted = false
+                  }
+                }
+              }
+
+              Button {
+                id: pasteKeyBtn
+                z: 1
+                anchors.right: parent.right
+                anchors.rightMargin: Style.space(4)
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Paste"
+                horizontalPadding: Style.space(8)
+                verticalPadding: Style.space(2)
+                fontSize: Style.font.caption
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: root.pasteKey()
+              }
+            }
+
+            Button {
+              id: saveKeyBtn
+              text: "Save"
+              enabled: keyField.text.trim() !== "" && !setKeyProc.running
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: root.saveKey()
+            }
+          }
+
+          Text {
+            width: parent.width
+            wrapMode: Text.WordWrap
+            textFormat: Text.PlainText
+            text: root.hasKey
+              ? "A key is on file. Paste another to replace it."
+              : "Make a key at https://" + root.host + "/unifi-api/protect. Prefer a view-only local user."
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            color: root.foreground
+            opacity: 0.6
+          }
+
+          PanelSectionHeader {
+            width: parent.width
+            visible: root.hasCameras
+            text: "CAMERAS THAT MAY INTERRUPT YOU"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+
+          Text {
+            visible: root.hasCameras
+            width: parent.width
+            wrapMode: Text.WordWrap
+            textFormat: Text.PlainText
+            text: "Which cameras may light the icon and file frames. Leave them all on to hear about every camera, including ones added later."
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            color: root.foreground
+            opacity: 0.6
+          }
+
+          Repeater {
+            model: root.hasCameras ? root.cameras : []
+
+            Toggle {
+              required property var modelData
+              width: settingsCol.width
+              label: root.plain(modelData.name)
+              checked: root.alerts(modelData.id)
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: root.toggleAlertCamera(modelData.name)
+            }
+          }
+
+          Toggle {
+            width: parent.width
+            label: "Raise a notification on motion"
+            description: "A desktop notification with the frame in it, so motion reaches you when the bar is not where you are looking."
+            checked: root.notify
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onClicked: root.persistSettings({ notify: !root.notify })
+          }
+        }
+      }
+    }
     }
   }
 }

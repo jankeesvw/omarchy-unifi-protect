@@ -23,10 +23,17 @@ where you go when a glance is not enough.
 omarchy plugin add https://github.com/jankeesvw/omarchy-unifi-protect.git --enable
 ```
 
-Then give it a key, pin your console's certificate, and tell it where the
-console is — the three sections below. The widget lands in the right section
-of the bar; move it with `omarchy bar move`, or from the bar's own settings
-panel.
+Open the camera icon in the bar. Until it has an API key the panel opens
+on settings instead of cameras:
+
+1. Set the console address if it is not already right.
+2. Paste an API key and save it.
+
+The first time the widget talks to the console it files that certificate
+and keeps talking only to it. The same two steps can be done from the
+shell if you would rather script them — the sections below. The widget
+lands in the right section of the bar; move it with `omarchy bar move`,
+or from the bar's own settings panel.
 
 ## The API key
 
@@ -44,7 +51,13 @@ Everything goes through Protect's integration API, which takes a plain
 > needs — and a key that leaks is then a key that can look at your cameras
 > rather than one that can reconfigure your network.
 
-The widget looks for the key in two places, in this order:
+The panel's settings view is the ordinary way to file a key: paste it, save,
+and it is written to the key file over stdin so it never appears on a process
+command line or in `shell.json`. The widget never reads the stored key back
+into the UI; it only shows that a key is on file.
+
+The same file can be written by hand, which is what a script should do. The
+widget looks for the key in two places, in this order:
 
 1. `UNIFI_API_KEY` in the environment.
 2. A file, by default `~/.config/unifi-protect/api-key`. Set
@@ -54,39 +67,51 @@ The file is the one that works straight away, because a variable exported into
 your session does not reach a shell that is already running:
 
 ```bash
+printf '%s\n' "paste-your-key-here" | ./bin/unifi-protect set-key
+```
+
+or, equivalently:
+
+```bash
 mkdir -p ~/.config/unifi-protect
 (umask 077; printf '%s\n' "paste-your-key-here" > ~/.config/unifi-protect/api-key)
 ```
 
 The first line with something on it is the key, trimmed. Nothing else in the
-file is parsed, and the widget never writes to it.
+file is parsed.
 
 ## Pinning the console
 
 Your console signs its own certificate. There is no authority that can vouch
 for it, so there is nothing to check it against — and the key above travels on
-every one of these connections. Pin it once:
+every one of these connections. The first time the widget talks to the
+console it files whatever certificate is answering, then every later
+connection has to present that same key or be dropped before the API key
+goes out. That is trust-on-first-use: you do not have to pin anything in
+the panel.
+
+`unifi-protect trust` is still there if you would rather look at the
+fingerprint first, or pin again after a console reset (the only other time
+the fingerprint should change, and the one case the widget will not
+overwrite for you):
 
 ```bash
 ~/.config/omarchy/plugins/jankeesvw.unifi-protect/bin/unifi-protect \
   --host 192.168.1.1 trust
 ```
 
-It prints the fingerprint of whatever answered on that address and waits.
-Compare it against the one the console shows under **Settings → System →
-Advanced** before you agree — that comparison is the whole of the security
-here, and it is the one moment you get to make it. Then the certificate is
-filed in `~/.config/unifi-protect/gateway.pem` and every later connection has
-to present that same key or be dropped before the API key goes out.
-
-Until you have done this the widget refuses to talk to anything, and says so.
-Run it again after a console reset or a certificate renewal, which is the only
-other time the fingerprint should change.
+It prints the fingerprint and waits. `trust show` prints the same facts as
+JSON without writing; `trust accept <fingerprint>` re-fetches the chain and
+pins it only if that fingerprint still matches, so the certificate you
+approved is the one filed.
 
 ## Settings
 
-All of it is configurable from the bar's settings panel, or by hand in the
-widget's entry in `~/.config/omarchy/shell.json`:
+The console address, the API key, which cameras may interrupt you, and the
+motion notification live in the widget's own settings view (the gear on
+the panel). The rest — panel width, snapshot interval, how long the icon
+stays lit — stays in the bar's settings panel, or by hand in the widget's
+entry in `~/.config/omarchy/shell.json`:
 
 | Setting | Default | What it does |
 |---|---|---|
@@ -179,6 +204,11 @@ cd ~/.config/omarchy/plugins/jankeesvw.unifi-protect
 ./bin/unifi-protect stream <camera-id>    # the RTSP url
 ./bin/unifi-protect live <camera-id>      # opens the stream in mpv
 ./bin/unifi-protect watch                 # motion as NDJSON, until killed
+./bin/unifi-protect status                # {ok, hasKey, trusted, host}
+./bin/unifi-protect set-key               # writes a key from stdin
+./bin/unifi-protect trust show            # the live certificate, as JSON
+./bin/unifi-protect trust accept <fp>     # pins that fingerprint
+./bin/unifi-protect trust                 # the same, interactively
 ```
 
 `--host`, `--rtsp-port` and `--archive-keep` go before the command. It is also
@@ -213,9 +243,10 @@ sudo pacman -S --needed curl jq python python-websockets imagemagick libnotify m
 Chain and hostname checking are off for calls to the console — its
 certificate names the console, not the address you reach it on, and nothing on
 your network can build a chain to it. What replaces them is the certificate
-you pinned: curl is given `--pinnedpubkey`, which it enforces regardless, and
-the motion websocket loads the pinned certificate as its only trust root. A
-connection that presents anything else is dropped before the API key is sent.
+filed on first contact: curl is given `--pinnedpubkey`, which it enforces
+regardless, and the motion websocket loads that certificate as its only
+trust root. A connection that presents anything else is dropped before the
+API key is sent.
 
 Camera ids come off those connections and end up in filenames, so they are
 checked against `[A-Za-z0-9]{1,64}` — Protect's own format — and anything else
