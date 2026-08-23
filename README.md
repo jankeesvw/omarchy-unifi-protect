@@ -217,6 +217,20 @@ you pinned: curl is given `--pinnedpubkey`, which it enforces regardless, and
 the motion websocket loads the pinned certificate as its only trust root. A
 connection that presents anything else is dropped before the API key is sent.
 
+The key itself never becomes an argument. `/proc/PID/cmdline` is mode 444 and
+readable by every account on the machine, and a widget that polls would hold
+that window open all day, so curl is handed the header on stdin through
+`--config -`, and the motion websocket reads the key out of its environment —
+`/proc/PID/environ` is mode 400, so that one is only readable by you. Nor does
+the key reach a log: `bash -x` prints the words of every command it runs, so
+the trace is switched off around the three places that hold it and back on
+afterwards.
+
+The key file and the pinned certificate are written under `umask 077`, and the
+directory holding them is checked to be a directory of yours at mode 700 —
+along with the frame cache and the archive, which are pictures of the inside of
+your house.
+
 Camera ids come off those connections and end up in filenames, so they are
 checked against `[A-Za-z0-9]{1,64}` — Protect's own format — and anything else
 is refused rather than escaped.
