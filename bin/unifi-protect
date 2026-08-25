@@ -93,19 +93,31 @@ fail() {
   exit 1
 }
 
-# The command a click on the notification runs, with the frame filled in.
+# The argv a click on the notification runs, with the frame filled in. Fills
+# the array named by $1.
 #
-# The notification server takes this as a hint and runs it through `bash -lc`
-# when the popup is clicked, so the path is quoted here: an archive lives
-# under $HOME and a home directory is allowed a space in it.
-viewer_command() {
-  local quoted
-  printf -v quoted '%q' "$1"
-  if [[ "$VIEWER" == *"{path}"* ]]; then
-    printf '%s' "${VIEWER//\{path\}/$quoted}"
-  else
-    printf '%s %s' "$VIEWER" "$quoted"
-  fi
+# VIEWER is a command template, so splitting it on whitespace is the point:
+# those words are the user's own configuration. The frame path is data and
+# lands in exactly one element whatever is in it, which is why nothing here
+# quotes for a shell. The notification server runs the vector as positional
+# parameters and never re-parses it.
+viewer_argv() {
+  local -n argv_ref=$1
+  local path=$2
+  local -a words=()
+  local word filled=0
+
+  read -ra words <<<"$VIEWER"
+  argv_ref=()
+  for word in "${words[@]}"; do
+    if [[ "$word" == *"{path}"* ]]; then
+      argv_ref+=("${word//\{path\}/$path}")
+      filled=1
+    else
+      argv_ref+=("$word")
+    fi
+  done
+  ((filled)) || argv_ref+=("$path")
 }
 
 # The key, from the environment if it is there, otherwise from the key file.
@@ -369,26 +381,30 @@ case "${1:-list}" in
       rm -f -- "$old"
     done
 
-    if [[ -n "$name" ]] && command -v notify-send >/dev/null 2>&1; then
+    if [[ -n "$name" ]] && command -v omarchy-notification-send >/dev/null 2>&1; then
       # The frame itself is the icon, so the notification answers "who" rather
       # than only "something moved".
       #
       # An icon is a thumbnail, though, and the thing you want when something
       # moved is a good look at it. Clicking the popup opens the same frame
-      # full size: the command travels as the `omarchy-exec` hint, which the
-      # shell's notification server stores with the toast and runs on click.
-      # A libnotify action would be the portable way to say this, but
-      # notify-send has to stay alive to receive one, and this script is over
-      # in a third of a second.
-      notify_hints=()
-      viewer="$(viewer_command "$out")"
-      [[ -n "$VIEWER" ]] && notify_hints+=(-h "string:omarchy-exec:$viewer")
+      # full size: --exec hands the shell's notification server an argv vector,
+      # which it stores with the toast and runs on click. A libnotify action
+      # would be the portable way to say this, but the sender has to stay alive
+      # to receive one, and this script is over in a third of a second.
+      #
+      # omarchy-notification-send rather than notify-send because only it can
+      # carry the click action, and because it speaks to the bus directly: a
+      # camera name is Protect's, and notify-send would read one that opens
+      # with a dash as an option.
+      viewer=()
+      [[ -n "$VIEWER" ]] && viewer_argv viewer "$out"
 
-      # -- because the camera name is Protect's, and a name that opens with a
-      # dash would otherwise be read as an option.
-      notify-send -t "$NOTIFY_TIMEOUT" -i "$out" -a "Camera" \
-        "${notify_hints[@]}" -- \
-        "Motion at $name" "$(date '+%H:%M')" 2>/dev/null || true
+      # --exec last, and only when there is one: it consumes the rest of the
+      # line, and an empty vector would make it consume nothing and error.
+      send=(omarchy-notification-send -t "$NOTIFY_TIMEOUT" -i "$out"
+        --app-name "Camera" "Motion at $name" "$(date '+%H:%M')")
+      ((${#viewer[@]})) && send+=(--exec "${viewer[@]}")
+      "${send[@]}" 2>/dev/null || true
     fi
 
     printf '%s\n' "$out"

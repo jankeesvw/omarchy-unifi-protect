@@ -123,9 +123,11 @@ it opens the same picture full size. `viewerCommand` is what runs, with
 
 The default hands the file to whatever your desktop opens a JPEG with. Name a
 viewer to be sure of which one, or leave it empty for a popup that does
-nothing. The command goes out as the `omarchy-exec` hint, which the shell's
-notification server keeps with the toast, so a frame is still one click away
-after the popup has moved into the notification history.
+nothing. The template is split on whitespace and goes out as an argv vector,
+which the shell's notification server keeps with the toast, so a frame is
+still one click away after the popup has moved into the notification history.
+The frame path is one argument however it is spelled, so a space or a dash in
+it stays part of the filename.
 
 `eventsUrl` is Protect's detection browser filtered to one camera. `{host}` is
 the console and `{camera}` the camera id, and the default is:
