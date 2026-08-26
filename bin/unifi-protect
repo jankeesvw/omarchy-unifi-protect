@@ -197,7 +197,29 @@ valid_stream_url() {
   [[ "$1" =~ ^rtsps?://[A-Za-z0-9.:_-]+/[A-Za-z0-9._~-]+(\?[A-Za-z0-9._~=\&-]*)?$ ]]
 }
 
+# Keeping the key out of the arguments is worth nothing if the shell prints it
+# anyway. `bash -x` traces the words of every command it runs, so a debug run
+# of this script writes the key to stderr -- and stderr is exactly what the
+# shell hands to the journal when the widget runs this. So the trace goes off
+# around each of the three places that hold the key, and back afterwards to
+# whatever it was.
+TRACED=0
+untrace() { case "$-" in *x*) TRACED=1; set +x ;; *) TRACED=0 ;; esac; }
+retrace() { (( TRACED )) && set -x; return 0; }
+
+untrace
 KEY="$(key)"
+retrace
+
+# The key goes to curl on stdin rather than in an argument, and a quote or a
+# backslash would end that line early and turn the rest of the key into curl
+# options -- a `user = "..."` of the sender's choosing, say, or a second
+# header. A Protect key is drawn from this set, so a key that is not is not a
+# key worth sending anywhere. Checked in require_key rather than here:
+# status, set-key and trust have to run with no key on file yet.
+valid_key() {
+  [[ "$1" =~ ^[A-Za-z0-9._~+/=-]+$ ]]
+}
 
 # The SHA-256 of the pinned certificate's public key, in the form curl wants.
 # Read off the first certificate in the file, which is the gateway's own.
@@ -213,6 +235,7 @@ spki() {
 # an exit would be reported back as nothing more than an unreachable gateway.
 require_key() {
   [[ -n "$KEY" ]] || fail "no API key: set UNIFI_API_KEY or write one to $KEY_FILE"
+  valid_key "$KEY" || fail "malformed API key: set UNIFI_API_KEY or write one to $KEY_FILE"
 }
 
 PIN=""
@@ -238,9 +261,25 @@ tls_args() {
   CURL_TLS=(-k --pinnedpubkey "sha256//$PIN")
 }
 
+# Every request that carries the key goes through here. The key rides in on
+# stdin instead of in the arguments: /proc/PID/cmdline is mode 444 on a stock
+# kernel -- no hidepid -- so every argument of every running process is
+# readable by any account on the machine, and a widget that polls reopens that
+# window on a loop. curl reads a `header` line from --config exactly as it
+# reads -H, and nobody else gets to read this stdin.
+curl_key() {
+  local status
+  untrace
+  printf 'header = "X-API-KEY: %s"\n' "$KEY" \
+    | curl -s "${CURL_TLS[@]}" --config - "$@"
+  status=$?
+  retrace
+  return "$status"
+}
+
 api() {
   tls_args
-  curl -s "${CURL_TLS[@]}" -m "$TIMEOUT" -H "X-API-KEY: $KEY" "$API$1"
+  curl_key -m "$TIMEOUT" "$API$1"
 }
 
 # --host may already carry a port, in which case that is the one to look at.
@@ -316,7 +355,7 @@ case "${1:-list}" in
     # one path would leave the widget showing the first frame forever; a new
     # name means the source changes and the picture actually updates.
     out="$CACHE_DIR/$id-$(date +%s%3N).jpg"
-    code="$(curl -s "${CURL_TLS[@]}" -m "$SNAPSHOT_TIMEOUT" -H "X-API-KEY: $KEY" \
+    code="$(curl_key -m "$SNAPSHOT_TIMEOUT" \
       -o "$out" -w '%{http_code}' "$API/cameras/$id/snapshot")"
 
     if [[ "$code" != "200" || ! -s "$out" ]]; then
@@ -373,7 +412,7 @@ case "${1:-list}" in
 
     tmp="$ARCHIVE_DIR/.$id.tmp.jpg"
     out="$ARCHIVE_DIR/$id-$now.jpg"
-    code="$(curl -s "${CURL_TLS[@]}" -m "$SNAPSHOT_TIMEOUT" -H "X-API-KEY: $KEY" \
+    code="$(curl_key -m "$SNAPSHOT_TIMEOUT" \
       -o "$tmp" -w '%{http_code}' "$API/cameras/$id/snapshot")"
 
     if [[ "$code" != "200" || ! -s "$tmp" ]]; then
@@ -495,7 +534,12 @@ case "${1:-list}" in
     # testing by hand with curl.
     require_key
     tls_args
+    # Environment rather than argument: /proc/PID/environ is mode 400, readable
+    # only by the account that owns the process, where /proc/PID/cmdline is 444
+    # and readable by every account on the machine.
+    untrace
     export UNIFI_WATCH_KEY="$KEY" UNIFI_WATCH_HOST="$HOST" UNIFI_WATCH_CERT="$CERT_FILE"
+    retrace
     exec python3 -u -c '
 import asyncio, json, os, re, ssl, sys
 
@@ -609,6 +653,7 @@ asyncio.run(main())
     # `ps` listing). First non-blank line, trimmed — the same rule `key()`
     # reads back. The file is 0600: the umask at the top covers a new file,
     # and chmod puts a looser existing file back.
+    untrace
     new_key=""
     while IFS= read -r line || [[ -n "$line" ]]; do
       line="${line#"${line%%[![:space:]]*}"}"
@@ -618,8 +663,10 @@ asyncio.run(main())
       break
     done
     [[ -n "$new_key" ]] || fail "empty key"
+    valid_key "$new_key" || fail "malformed API key"
     private_dir "${KEY_FILE%/*}" || fail "cannot write ${KEY_FILE%/*}"
     printf '%s\n' "$new_key" > "$KEY_FILE" || fail "cannot write $KEY_FILE"
+    retrace
     chmod 600 -- "$KEY_FILE" || fail "cannot write $KEY_FILE"
     printf '{"ok":true}\n'
     ;;
@@ -670,8 +717,8 @@ asyncio.run(main())
         [[ -n "$new_fp" ]] || fail "that is not a certificate"
         got="$(normalize_fp "$new_fp")"
         [[ "$got" == "$want" ]] || fail "certificate changed before it could be pinned"
-        mkdir -p -- "${CERT_FILE%/*}" || fail "cannot write ${CERT_FILE%/*}"
-        printf '%s\n' "$chain" > "$CERT_FILE" || fail "cannot write $CERT_FILE"
+        private_dir "${CERT_FILE%/*}" || fail "cannot write ${CERT_FILE%/*}"
+        (umask 077; printf '%s\n' "$chain" > "$CERT_FILE") || fail "cannot write $CERT_FILE"
         printf '{"ok":true}\n'
         ;;
 
@@ -713,8 +760,12 @@ asyncio.run(main())
           [[ "$answer" == [yY]* ]] || { printf 'Nothing pinned.\n' >&2; exit 1; }
         fi
 
-        mkdir -p -- "${CERT_FILE%/*}" || {
-          printf 'cannot write %s\n' "${CERT_FILE%/*}" >&2; exit 1; }
+        # Same check as the cache and the archive get. This is the directory
+        # the key file lives in too, and an install from before the umask
+        # above was here left it at 755 -- so the first run of `trust` closes
+        # it, along with anything a previous version wrote into it.
+        private_dir "${CERT_FILE%/*}" || {
+          printf '%s is not a directory of ours\n' "${CERT_FILE%/*}" >&2; exit 1; }
         (umask 077; printf '%s\n' "$chain" > "$CERT_FILE") || {
           printf 'cannot write %s\n' "$CERT_FILE" >&2; exit 1; }
 
