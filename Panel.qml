@@ -137,6 +137,19 @@ Panel {
     return null
   }
 
+  // Repeater rebuilds every delegate when the model is replaced, which blanks
+  // the thumbnails. The list barely changes, so keep the existing array when
+  // nothing in it moved.
+  function sameCameras(next) {
+    if (!next || next.length !== cameras.length) return false
+    for (var i = 0; i < next.length; i++) {
+      if (cameras[i].id !== next[i].id) return false
+      if (cameras[i].name !== next[i].name) return false
+      if (cameras[i].connected !== next[i].connected) return false
+    }
+    return true
+  }
+
   readonly property var selected: cameraById(selectedId)
   readonly property var motionCamera: cameraById(motionId)
 
@@ -214,7 +227,8 @@ Panel {
         try {
           var data = JSON.parse(text)
           root.reachable = data.ok === true
-          root.cameras = data.cameras || []
+          var next = data.cameras || []
+          if (!root.sameCameras(next)) root.cameras = next
           if (root.selectedId === "" && root.cameras.length > 0)
             root.selectedId = root.cameras[0].id
         } catch (e) {
@@ -884,7 +898,11 @@ Panel {
           id: video
           anchors.fill: parent
           fillMode: VideoOutput.PreserveAspectCrop
-          visible: !root.reviewing && player.playbackState === MediaPlayer.PlayingState
+          // Keep the last frame up while the stream buffers. Hiding this the
+          // moment playbackState is not Playing is a flash of the still
+          // underneath, or of "Connecting", once a second on a jittery RTSP
+          // link.
+          visible: !root.reviewing && player.showingVideo
         }
 
         // Playing only while the panel is open. A camera stream left running
@@ -897,10 +915,19 @@ Panel {
           // No AudioOutput is attached on purpose: without one Qt plays the
           // video and drops the audio track, which is what a bar panel wants.
 
-          onSourceChanged: if (source != "") play()
+          property bool showingVideo: false
+
+          onSourceChanged: {
+            showingVideo = false
+            if (source != "") play()
+          }
+          onPlaybackStateChanged: {
+            if (playbackState === MediaPlayer.PlayingState) showingVideo = true
+          }
           onErrorOccurred: function(err, str) {
             // Falling back to the stills is better than an empty rectangle;
             // they keep refreshing regardless of what the stream does.
+            showingVideo = false
             console.log("jankeesvw.unifi-protect: stream error", err, str)
           }
         }
