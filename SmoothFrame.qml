@@ -32,6 +32,11 @@ Item {
       decodeWidth = w
   }
 
+  Component.onCompleted: {
+    var w = Math.round(width)
+    if (w > 0 && decodeWidth === 0) decodeWidth = w
+  }
+
   Image {
     id: shown
     anchors.fill: parent
