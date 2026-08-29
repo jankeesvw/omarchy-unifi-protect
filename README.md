@@ -222,11 +222,13 @@ connection that presents anything else is dropped before the API key is sent.
 The key itself never becomes an argument. `/proc/PID/cmdline` is mode 444 and
 readable by every account on the machine, and a widget that polls would hold
 that window open all day, so curl is handed the header on stdin through
-`--config -`, and the motion websocket reads the key out of its environment —
-`/proc/PID/environ` is mode 400, so that one is only readable by you. Nor does
-the key reach a log: `bash -x` prints the words of every command it runs, so
-the trace is switched off around the three places that hold it and back on
-afterwards.
+`--config -`. The motion websocket gets it on a pipe for the same reason one
+step further in: `/proc/PID/environ` is mode 400, which keeps other accounts
+out but not other processes of yours, and that watcher is meant to run for
+days, so anything running as you could read it out at leisure. A pipe is
+readable only while it is being read, and the watcher drains it in its first
+line. Nor does the key reach a log: `bash -x` prints the words of every
+command it runs, so the trace is switched off around the places that hold it.
 
 The key file and the pinned certificate are written under `umask 077`, and the
 directory holding them is checked to be a directory of yours at mode 700 —
