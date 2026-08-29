@@ -96,6 +96,12 @@ Panel {
 
   property var cameras: []
   property bool reachable: true
+  // What the motion watcher last complained about, which is a different thing
+  // from the console being unreachable: the cameras can list perfectly well
+  // while motion is off because the watcher could not start. It said so on
+  // stdout all along and nothing here was listening, so a fresh install where
+  // python-websockets is missing showed a widget that simply never lit up.
+  property string motionNotice: ""
   property string selectedId: ""
   // Camera id -> path of the newest frame on disk.
   property var frames: ({})
@@ -346,6 +352,11 @@ Panel {
         } catch (e) {
           return
         }
+        if (event.type === "error") {
+          root.motionNotice = root.plain(event.error || "")
+          return
+        }
+        if (event.type === "motion" && event.camera) root.motionNotice = ""
         if (event.type !== "motion" || !event.camera) return
         if (!root.alerts(event.camera)) return
         if (event.ended) {
@@ -880,6 +891,21 @@ Panel {
             }
           }
         }
+      }
+
+      // Motion being off is worth saying even when the cameras are fine, so
+      // this sits outside the no-cameras notice rather than inside it.
+      Text {
+        textFormat: Text.PlainText
+        width: parent.width
+        visible: root.motionNotice !== ""
+        text: root.motionNotice
+        horizontalAlignment: Text.AlignHCenter
+        wrapMode: Text.WordWrap
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        color: root.foreground
+        opacity: 0.6
       }
 
       Text {

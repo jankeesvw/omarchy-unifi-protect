@@ -508,7 +508,7 @@ try:
 except ImportError:
     print(json.dumps({
         "type": "error",
-        "error": "the python websockets package is missing; motion events are off",
+        "error": "Motion needs python-websockets: sudo pacman -S python-websockets",
     }), flush=True)
     sys.exit(1)
 
