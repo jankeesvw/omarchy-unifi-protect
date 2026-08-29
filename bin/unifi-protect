@@ -481,12 +481,25 @@ case "${1:-list}" in
     # missing endpoint. websockets does 1.1, so this is only a trap when
     # testing by hand with curl.
     tls_args
-    # Environment rather than argument: /proc/PID/environ is mode 400, readable
-    # only by the account that owns the process, where /proc/PID/cmdline is 444
-    # and readable by every account on the machine.
+    # The key goes in on a pipe, and only the two public values are exported.
+    #
+    # /proc/PID/cmdline is 444, so an argument is readable by every account on
+    # the machine. /proc/PID/environ is 400, which closes that but not the case
+    # that matters here: it stays readable by every process of the same
+    # account, and this watcher is meant to run for days. Anything that ever
+    # executes as you, from a build script to something a package installed,
+    # could read a full-rights Protect key out of it at leisure.
+    #
+    # A pipe is readable only while it is being read, and this one is drained
+    # in the first line the watcher runs, so there is no window to come back
+    # to. Process substitution rather than a here-string, because bash backs a
+    # here-string with a temporary file.
+    export UNIFI_WATCH_HOST="$HOST" UNIFI_WATCH_CERT="$CERT_FILE"
+    # Tracing off before the exec, not inside the substitution that feeds it:
+    # bash writes the whole redirection, expansions and all, before any command
+    # within it runs, so an untrace in there is already too late. There is no
+    # retrace because exec does not come back.
     untrace
-    export UNIFI_WATCH_KEY="$KEY" UNIFI_WATCH_HOST="$HOST" UNIFI_WATCH_CERT="$CERT_FILE"
-    retrace
     exec python3 -u -c '
 import asyncio, json, os, re, ssl, sys
 
@@ -499,7 +512,11 @@ except ImportError:
     }), flush=True)
     sys.exit(1)
 
-key = os.environ["UNIFI_WATCH_KEY"]
+# First thing, before anything else can go wrong and leave it sitting there.
+key = sys.stdin.readline().strip()
+if not key:
+    print(json.dumps({"type": "error", "error": "no api key was handed to the watcher"}), flush=True)
+    sys.exit(1)
 host = os.environ["UNIFI_WATCH_HOST"]
 url = f"wss://{host}/proxy/protect/integration/v1/subscribe/events"
 
@@ -578,7 +595,7 @@ async def main():
 
 
 asyncio.run(main())
-' ;;
+' < <(printf '%s\n' "$KEY") ;;
 
   trust)
     # Run once, by hand, before anything else works. Trust-on-first-use: this
