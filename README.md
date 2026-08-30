@@ -201,7 +201,7 @@ Omarchy with `omarchy-shell` (the Quickshell-based bar), and:
 | | |
 |---|---|
 | `curl`, `jq` | talking to Protect |
-| `python3` + [`websockets`](https://pypi.org/project/websockets/) | motion events. Without it everything works except the icon lighting up. |
+| `python3` + [`websockets`](https://pypi.org/project/websockets/) | motion events. Without it everything works except the icon lighting up, and the panel says so. If your distro has no package for it, `unifi-protect setup` offers to put one in a virtualenv of your own after telling you what it is about to do. |
 | `imagemagick` | shrinking archived frames. Without it they are stored full size. |
 | `libnotify` | the notification on motion |
 | `mpv` | only for `unifi-protect live` |

@@ -11,6 +11,8 @@
 #   unifi-protect live <id>        # opens the live RTSPS stream in mpv
 #   unifi-protect watch            # streams motion as NDJSON, one event per line
 #   unifi-protect trust            # pins the gateway's certificate; run once
+#   unifi-protect setup            # a python with websockets for motion, if
+#                                  # your distro has no package for it
 #
 # Options, before the command:
 #   --host <host>        gateway address        (default 192.168.1.1)
@@ -82,6 +84,12 @@ ARCHIVE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/unifi-protect/events"
 KEY_FILE="${UNIFI_API_KEY_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/unifi-protect/api-key}"
 # The gateway's certificate, as pinned by `unifi-protect trust`.
 CERT_FILE="${UNIFI_CERT_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/unifi-protect/gateway.pem}"
+
+# Where `unifi-protect setup` puts a python for the motion watcher, on a
+# machine whose distro has no websockets package. Nothing is ever installed
+# without being asked for; see the setup command.
+VENV_DIR="${UNIFI_VENV:-${XDG_DATA_HOME:-$HOME/.local/share}/unifi-protect/venv}"
+VENV_PYTHON="$VENV_DIR/bin/python"
 # Seconds within which a second request for the same camera is answered with
 # the frame already on disk.
 ARCHIVE_DEBOUNCE=15
@@ -499,8 +507,19 @@ case "${1:-list}" in
     # bash writes the whole redirection, expansions and all, before any command
     # within it runs, so an untrace in there is already too late. There is no
     # retrace because exec does not come back.
+    # The system interpreter if it has websockets, otherwise the one setup put
+    # aside. Nothing is installed from here: this runs on its own whenever the
+    # shell starts, and a bar widget that fetches and executes a package off
+    # the network at that moment is taking a trust nobody gave it. With
+    # neither, python3 gets the script anyway so the import error below is
+    # what the panel hears.
+    WATCH_PY=python3
+    if ! python3 -c 'import websockets' >/dev/null 2>&1 &&
+       [[ -x "$VENV_PYTHON" ]] && "$VENV_PYTHON" -c 'import websockets' >/dev/null 2>&1; then
+      WATCH_PY="$VENV_PYTHON"
+    fi
     untrace
-    exec python3 -u -c '
+    exec "$WATCH_PY" -u -c '
 import asyncio, json, os, re, ssl, sys
 
 try:
@@ -508,7 +527,7 @@ try:
 except ImportError:
     print(json.dumps({
         "type": "error",
-        "error": "Motion needs python-websockets: sudo pacman -S python-websockets",
+        "error": "Motion needs the python websockets package: sudo pacman -S python-websockets, or run unifi-protect setup",
     }), flush=True)
     sys.exit(1)
 
@@ -596,6 +615,58 @@ async def main():
 
 asyncio.run(main())
 ' < <(printf '%s\n' "$KEY") ;;
+
+  setup)
+    # Motion needs the python websockets package. The tidy way is the distro
+    # package; this is for a machine that has none and no wish to hand a bar
+    # widget sudo.
+    #
+    # Typed by hand, and it says what it is about to do before it does it.
+    # That is the whole difference: installing something off the network is a
+    # thing a person agrees to, not a thing a widget does on its own the first
+    # time it starts. Human output rather than JSON, because a person is
+    # reading it.
+    if python3 -c 'import websockets' >/dev/null 2>&1; then
+      printf 'The system python already has websockets. Nothing to do.\n'
+      exit 0
+    fi
+    if [[ -x "$VENV_PYTHON" ]] && "$VENV_PYTHON" -c 'import websockets' >/dev/null 2>&1; then
+      printf 'Already set up: %s\n' "$VENV_PYTHON"
+      exit 0
+    fi
+
+    printf 'The system python has no websockets package, which is what motion\n'
+    printf 'events need. On Arch the tidy way is:\n\n'
+    printf '    sudo pacman -S --needed python-websockets\n\n'
+    printf 'Otherwise this installs it from PyPI into a virtualenv of your own:\n\n'
+    printf '    %s\n\n' "$VENV_DIR"
+    printf 'Nothing outside that directory is touched and no privileges are asked\n'
+    printf 'for. Remove it by deleting the directory.\n\n'
+
+    # No terminal means nobody is there to agree, so nothing is installed.
+    # The other way round, carrying on when there is no one to ask, is how a
+    # command a person is supposed to type ends up running from a script.
+    if [[ ! -t 0 ]]; then
+      printf 'Run this in a terminal, or pass --yes if you mean it from a script.\n' >&2
+      [[ "${2:-}" == "--yes" ]] || exit 1
+    else
+      read -r -p 'Create it and install websockets from PyPI? [y/N] ' answer
+      [[ "$answer" == [yY]* ]] || { printf 'Nothing installed.\n' >&2; exit 1; }
+    fi
+
+    python3 -m venv "$VENV_DIR" ||
+      { printf 'could not create %s\n' "$VENV_DIR" >&2; exit 1; }
+    if command -v uv >/dev/null 2>&1; then
+      uv pip install --python "$VENV_PYTHON" websockets ||
+        { printf 'could not install websockets\n' >&2; exit 1; }
+    else
+      "$VENV_PYTHON" -m pip install websockets ||
+        { printf 'could not install websockets\n' >&2; exit 1; }
+    fi
+    "$VENV_PYTHON" -c 'import websockets' >/dev/null 2>&1 ||
+      { printf 'installed, but the import still fails\n' >&2; exit 1; }
+    printf '\nDone: %s\nRestart the shell to pick it up.\n' "$VENV_PYTHON"
+    ;;
 
   trust)
     # Run once, by hand, before anything else works. Trust-on-first-use: this
