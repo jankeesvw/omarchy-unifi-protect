@@ -7,6 +7,7 @@
 #                                  # files a snapshot in the archive; with a
 #                                  # name it also raises a desktop notification
 #   unifi-protect events [n]       # lists the archive, newest first
+#   unifi-protect cached           # newest snapshot on disk per camera, no network
 #   unifi-protect stream <id>      # prints the RTSP url of the live stream
 #   unifi-protect live <id>        # opens the live RTSPS stream in mpv
 #   unifi-protect watch            # streams motion as NDJSON, one event per line
@@ -416,6 +417,38 @@ case "${1:-list}" in
     fi
 
     printf '%s\n' "$out"
+    ;;
+
+  cached)
+    # No network call: just whatever `snapshot` last left in the cache
+    # directory for each camera. The widget calls this once at startup, so a
+    # quickshell reload shows the last live view it had instead of a blank
+    # thumbnail until the next snapshot round-trip lands.
+    declare -A newest_ts newest_path
+    if [[ -d "$CACHE_DIR" ]]; then
+      shopt -s nullglob
+      for f in "$CACHE_DIR"/*.jpg; do
+        base="${f##*/}"
+        base="${base%.jpg}"
+        id="${base%-*}"
+        ts="${base##*-}"
+        [[ "$ts" =~ ^[0-9]+$ ]] || continue
+        valid_id "$id" || continue
+        if [[ -z "${newest_ts[$id]:-}" || "$ts" -gt "${newest_ts[$id]}" ]]; then
+          newest_ts[$id]="$ts"
+          newest_path[$id]="$f"
+        fi
+      done
+    fi
+    {
+      for id in "${!newest_path[@]}"; do
+        printf '%s\t%s\n' "$id" "${newest_path[$id]}"
+      done
+    } | jq -R -s -c '
+      split("\n") | map(select(length > 0) | split("\t")) |
+      (map({(.[0]): .[1]}) | add) // {} |
+      {ok: true, frames: .}
+    '
     ;;
 
   events)

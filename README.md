@@ -178,6 +178,7 @@ cd ~/.config/omarchy/plugins/jankeesvw.unifi-protect
 ./bin/unifi-protect list                  # cameras, as JSON
 ./bin/unifi-protect snapshot <camera-id>  # writes a JPEG, prints its path
 ./bin/unifi-protect events                # the archive, newest first
+./bin/unifi-protect cached                # newest snapshot on disk per camera
 ./bin/unifi-protect stream <camera-id>    # the RTSP url
 ./bin/unifi-protect live <camera-id>      # opens the stream in mpv
 ./bin/unifi-protect watch                 # motion as NDJSON, until killed

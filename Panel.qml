@@ -180,6 +180,16 @@ Panel {
     frames = next
   }
 
+  // Merges a whole batch of frames in one go, rather than one setFrame per
+  // key: cachedProc hands back every camera's frame at once, and replacing
+  // `frames` once means one binding update instead of one per camera.
+  function mergeFrames(map) {
+    var next = {}
+    for (var k in frames) next[k] = frames[k]
+    for (var k in map) next[k] = map[k]
+    frames = next
+  }
+
   function setStream(id, url) {
     var next = {}
     for (var k in streams) next[k] = streams[k]
@@ -287,6 +297,26 @@ Panel {
     proc.command = root.cmd(["snapshot", id])
     proc.running = true
   }
+
+  // Whatever `snapshot` left on disk from before this Panel instance existed
+  // -- last run, last quickshell reload -- so the thumbnails open on the last
+  // live view of each camera instead of a blank rectangle with just a name on
+  // it until the first round of snapshots lands. Run once, at startup: this
+  // is only ever a backfill for the gap before real frames arrive.
+  Process {
+    id: cachedProc
+    command: root.cmd(["cached"])
+    stdout: StdioCollector {
+      onStreamFinished: {
+        try {
+          var data = JSON.parse(text)
+          if (data.ok && data.frames) root.mergeFrames(data.frames)
+        } catch (e) {}
+      }
+    }
+  }
+
+  Component.onCompleted: cachedProc.running = true
 
   // Slow, because this only feeds the still behind the video: a fresh one
   // matters when the stream is still connecting or has dropped out, not while
