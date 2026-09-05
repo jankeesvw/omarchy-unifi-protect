@@ -488,6 +488,13 @@ Panel {
   // you might not be looking at it.
   readonly property bool notify: setting("notify", true)
 
+  // Runtime on/off, flipped from the panel's own switch rather than the
+  // settings form. Starts from the persisted default but the panel does not
+  // write shell.json, so a flip here lasts for the life of the shell rather
+  // than surviving a restart -- closer to muting an alert than to changing a
+  // setting.
+  property bool notifyEnabled: notify
+
   function capture(id) {
     var now = Date.now()
     if (lastCapture[id] && now - lastCapture[id] < captureThrottleMs) return
@@ -501,7 +508,7 @@ Panel {
     // The name comes along so the script can put it in the notification.
     // Whether one is raised at all is the script's call: it files a frame per
     // burst of motion, and only a filed frame is worth a popup.
-    captureProc.command = notify
+    captureProc.command = notifyEnabled
       ? root.cmd(["capture", id, nameOf(id)])
       : root.cmd(["capture", id])
     captureProc.running = true
@@ -962,12 +969,13 @@ Panel {
       Item {
         width: parent.width
         visible: root.view === "cameras"
-        height: Math.max(camerasHeader.implicitHeight, gearBtn.implicitHeight)
+        height: Math.max(camerasHeader.implicitHeight, gearBtn.implicitHeight,
+                         notifySwitch.implicitHeight)
 
         PanelSectionHeader {
           id: camerasHeader
           anchors.left: parent.left
-          anchors.right: gearBtn.left
+          anchors.right: notifySwitch.left
           anchors.rightMargin: Style.space(8)
           anchors.verticalCenter: parent.verticalCenter
           text: root.reviewing
@@ -976,6 +984,31 @@ Panel {
             : (root.selected ? root.plain(root.selected.name.toUpperCase()) : "CAMERAS")
           foreground: root.foreground
           fontFamily: root.fontFamily
+        }
+
+        // Quick mute for the desktop popups without a trip to the settings
+        // form. The bar icon still lights up on motion either way: this
+        // switch is about being interrupted, not about missing it entirely.
+        //
+        // Declared before the gear so Tab reaches it first: the ring walks
+        // declaration order, not the order things sit on screen.
+        ToggleSwitch {
+          id: notifySwitch
+          anchors.right: gearBtn.left
+          anchors.rightMargin: Style.space(8)
+          anchors.verticalCenter: parent.verticalCenter
+          checked: root.notifyEnabled
+          trackHeight: Math.max(Style.space(18),
+                                Math.round(camerasHeader.implicitHeight * 0.9))
+          foreground: root.foreground
+          onToggled: root.notifyEnabled = !root.notifyEnabled
+
+          PanelToolTip {
+            visible: notifySwitch.containsMouse
+            text: root.notifyEnabled ? "Notifications on motion: on"
+                                     : "Notifications on motion: off"
+            fontFamily: root.fontFamily
+          }
         }
 
         PanelActionButton {
