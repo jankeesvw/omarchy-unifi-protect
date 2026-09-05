@@ -66,7 +66,7 @@ Everything goes through Protect's integration API, which takes a plain
 The panel's settings view is the ordinary way to file a key: paste it, save,
 and it is written to the key file over stdin so it never appears on a process
 command line or in `shell.json`. The widget never reads the stored key back
-into the UI; it only shows that a key is on file.
+into the UI; it only shows whether one is saved.
 
 The same file can be written by hand, which is what a script should do. The
 widget looks for the key in two places, in this order:

@@ -1455,7 +1455,11 @@ Panel {
                 id: keyField
                 anchors.fill: parent
                 password: true
-                placeholderText: root.hasKey ? "Key on file" : "Paste API key"
+                // Never the key itself, not even masked: it is written and
+                // never read back, so the field can only say whether there is
+                // one. "Saved" rather than "on file", which is a filing
+                // cabinet's word for it.
+                placeholderText: root.hasKey ? "Key saved" : "Paste API key"
                 foreground: root.foreground
                 font.family: root.fontFamily
                 rightPadding: pasteKeyBtn.implicitWidth + Style.space(10)
@@ -1505,7 +1509,7 @@ Panel {
             wrapMode: Text.WordWrap
             textFormat: Text.PlainText
             text: root.hasKey
-              ? "A key is on file. Paste another to replace it."
+              ? "A key is saved. Paste another to replace it."
               : "Make a key at https://" + root.host + "/unifi-api/protect. Prefer a view-only local user."
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
