@@ -384,6 +384,13 @@ Panel {
   // you might not be looking at it.
   readonly property bool notify: setting("notify", true)
 
+  // Runtime on/off, flipped from the panel's own switch rather than the
+  // settings form. Starts from the persisted default but the panel does not
+  // write shell.json, so a flip here lasts for the life of the shell rather
+  // than surviving a restart -- closer to muting an alert than to changing a
+  // setting.
+  property bool notifyEnabled: notify
+
   function capture(id) {
     var now = Date.now()
     if (lastCapture[id] && now - lastCapture[id] < captureThrottleMs) return
@@ -397,7 +404,7 @@ Panel {
     // The name comes along so the script can put it in the notification.
     // Whether one is raised at all is the script's call: it files a frame per
     // burst of motion, and only a filed frame is worth a popup.
-    captureProc.command = notify
+    captureProc.command = notifyEnabled
       ? root.cmd(["capture", id, nameOf(id)])
       : root.cmd(["capture", id])
     captureProc.running = true
@@ -607,14 +614,40 @@ Panel {
       anchors.fill: parent
       spacing: Style.space(8)
 
-      PanelSectionHeader {
+      Item {
         width: parent.width
-        text: root.reviewing
-          ? root.plain(root.nameOf(root.reviewCamera).toUpperCase() + "  \u00b7  "
-                       + root.agoLongOf(root.reviewTs))
-          : (root.selected ? root.plain(root.selected.name.toUpperCase()) : "CAMERAS")
-        foreground: root.foreground
-        fontFamily: root.fontFamily
+        height: Math.max(sectionHeader.implicitHeight, notifySwitch.implicitHeight)
+
+        PanelSectionHeader {
+          id: sectionHeader
+          anchors.left: parent.left
+          anchors.verticalCenter: parent.verticalCenter
+          text: root.reviewing
+            ? root.plain(root.nameOf(root.reviewCamera).toUpperCase() + "  \u00b7  "
+                         + root.agoLongOf(root.reviewTs))
+            : (root.selected ? root.plain(root.selected.name.toUpperCase()) : "CAMERAS")
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+        }
+
+        // Quick mute for the desktop popups without a trip to the settings
+        // form. The bar icon still lights up on motion either way: this
+        // switch is about being interrupted, not about missing it entirely.
+        ToggleSwitch {
+          id: notifySwitch
+          anchors.right: parent.right
+          anchors.verticalCenter: parent.verticalCenter
+          checked: root.notifyEnabled
+          trackHeight: Math.max(18, Math.round(sectionHeader.implicitHeight * 0.9))
+          foreground: root.foreground
+          onToggled: root.notifyEnabled = !root.notifyEnabled
+
+          PanelToolTip {
+            visible: notifySwitch.containsMouse
+            text: root.notifyEnabled ? "Notifications on motion: on" : "Notifications on motion: off"
+            fontFamily: root.fontFamily
+          }
+        }
       }
 
       // Large view of the selected camera.

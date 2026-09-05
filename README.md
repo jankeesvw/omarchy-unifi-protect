@@ -85,6 +85,13 @@ other time the fingerprint should change.
 
 ## Settings
 
+A switch in the panel's header, next to the camera name, mutes those popups
+for the rest of the session without a trip to settings — a quick "stop
+interrupting me" rather than a change to the config. It starts from `notify`
+each time the shell starts, and does not write it back: the bar icon still
+lights up on motion regardless of the switch, since that part is silent
+either way.
+
 All of it is configurable from the bar's settings panel, or by hand in the
 widget's entry in `~/.config/omarchy/shell.json`:
 
@@ -92,7 +99,7 @@ widget's entry in `~/.config/omarchy/shell.json`:
 |---|---|---|
 | `host` | `192.168.1.1` | The console running Protect — a UDM, a Cloud Key, whatever answers on your network. Address or hostname, no scheme. |
 | `alertCameras` | *(empty)* | Camera names, comma separated, that may light the icon and file frames. Empty means all of them. |
-| `notify` | `true` | Raise a desktop notification, with the frame in it, on motion. |
+| `notify` | `true` | Raise a desktop notification, with the frame in it, on motion. Sets the starting position of the switch in the panel's header — see below. |
 | `viewerCommand` | `xdg-open {path}` | What clicking that notification runs, to see the frame full size. |
 | `panelWidth` | `800` | Panel width in the shell's spacing units. Trimmed to fit a small screen. |
 | `motionHoldMs` | `45000` | How long the icon stays lit after motion. |
