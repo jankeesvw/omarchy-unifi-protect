@@ -103,8 +103,15 @@ ARCHIVE_DEBOUNCE=15
 # How long the notification stays up, in milliseconds.
 NOTIFY_TIMEOUT=8000
 
+# $2, when given, is a machine-readable reason the panel can branch on. The
+# sentence beside it is for a person, and rewording it must not change what the
+# panel does.
 fail() {
-  printf '{"ok":false,"error":"%s"}\n' "$1"
+  if [[ -n "${2-}" ]]; then
+    printf '{"ok":false,"error":"%s","reason":"%s"}\n' "$1" "$2"
+  else
+    printf '{"ok":false,"error":"%s"}\n' "$1"
+  fi
   exit 1
 }
 
@@ -259,13 +266,24 @@ require_key() {
 }
 
 PIN=""
+# No certificate on file means no request. Pinning whatever answers on the
+# address and then handing it the key makes the pin a formality: the gateway
+# signs its own certificate, so the only thing separating the console from
+# anything else that can answer at that address is a person having compared
+# the fingerprint against the one the console shows under Settings -> System.
+# Doing that comparison is the whole of the security here, so it is a step
+# somebody takes rather than one this script takes for them.
+#
+# The panel reads this reason, runs `trust show`, puts the fingerprint on
+# screen and pins with `trust accept` once it has been agreed to. From a
+# terminal, `unifi-protect trust` does the same thing interactively.
 require_pin() {
   [[ -n "$PIN" ]] && return
   if [[ -r "$CERT_FILE" ]]; then
     PIN="$(spki "$CERT_FILE")"
     [[ -n "$PIN" ]] && return
   fi
-  auto_pin
+  fail "gateway not trusted yet: compare its fingerprint and pin it" untrusted
 }
 
 # -k is still here and still cannot go: the certificate names the console, not
@@ -315,21 +333,6 @@ fetch_chain() {
     | sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p'
 }
 
-# First time we talk to this address: file whatever is answering, then pin
-# to it. Later calls that already have a pin keep that pin; a certificate
-# that no longer matches is a refused connection, not a rewrite.
-auto_pin() {
-  command -v openssl >/dev/null 2>&1 || fail "openssl is needed to talk to the gateway"
-  local target chain
-  target="$(gateway_target)"
-  chain="$(fetch_chain "$target")"
-  [[ -n "$chain" ]] || fail "cannot reach https://$target/ to read its certificate"
-  private_dir "${CERT_FILE%/*}" || fail "cannot write ${CERT_FILE%/*}"
-  printf '%s\n' "$chain" > "$CERT_FILE" || fail "cannot write $CERT_FILE"
-  chmod 600 -- "$CERT_FILE" || fail "cannot write $CERT_FILE"
-  PIN="$(spki "$CERT_FILE")"
-  [[ -n "$PIN" ]] || fail "that is not a certificate"
-}
 
 # SHA-256 fingerprint of the first certificate on stdin, openssl's colon form.
 cert_fingerprint() {

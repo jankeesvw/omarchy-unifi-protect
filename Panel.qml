@@ -109,7 +109,18 @@ Panel {
   // settings instead of the dead "Protect unreachable" text.
   property string view: "settings"
   property bool hasKey: false
+  // Whether the gateway's certificate has been pinned. Until it has, no
+  // request carries the key: the console signs its own certificate, so a
+  // person comparing the fingerprint against the one it shows under
+  // Settings -> System is the only thing separating it from anything else
+  // that can answer at that address.
+  property bool trusted: false
+  // What `trust show` last reported: fingerprint, subject, expiry, and the
+  // fingerprint already on file if there is one.
+  property var trustInfo: null
+  property string trustError: ""
   readonly property bool needsSetup: !hasKey
+  readonly property bool needsTrust: hasKey && !trusted
   // True only after the user opened settings on purpose, so a successful
   // status check does not yank them back to cameras mid-edit.
   property bool userWantsSettings: false
@@ -352,6 +363,7 @@ Panel {
   onOpenedChanged: {
     if (opened) {
       if (root.needsSetup) root.showSettings()
+      else if (root.needsTrust) root.showTrust()
       else if (!root.userWantsSettings) root.showCameras()
       root.refreshStatus()
       thumbTimer.cursor = 0
@@ -605,6 +617,26 @@ Panel {
     view = "cameras"
   }
 
+  function showTrust() {
+    view = "trust"
+    trustError = ""
+    trustInfo = null
+    if (!trustShowProc.running) {
+      trustShowProc.command = root.cmd(["trust", "show"])
+      trustShowProc.running = true
+    }
+  }
+
+  // Pins what `trust show` put on screen, and only that: `trust accept`
+  // re-fetches the chain and refuses if the fingerprint has changed since,
+  // so agreeing to one certificate cannot pin a different one.
+  function acceptTrust() {
+    if (!trustInfo || trustAcceptProc.running) return
+    trustError = ""
+    trustAcceptProc.command = root.cmd(["trust", "accept", String(trustInfo.fingerprint)])
+    trustAcceptProc.running = true
+  }
+
   function toggleAlertCamera(name) {
     var want = String(name).toLowerCase()
     var allOn = alertCameras.length === 0
@@ -683,15 +715,63 @@ Panel {
   // ----------------------------------------------------------------- setup
 
   Process {
+    id: trustShowProc
+    stdout: StdioCollector {
+      onStreamFinished: {
+        try {
+          var data = JSON.parse(text)
+          if (data.ok === true) {
+            root.trustInfo = data
+            root.trustError = ""
+          } else {
+            root.trustInfo = null
+            root.trustError = root.plain(data.error || "could not read the certificate")
+          }
+        } catch (e) {
+          root.trustInfo = null
+          root.trustError = "could not read the certificate"
+        }
+      }
+    }
+  }
+
+  Process {
+    id: trustAcceptProc
+    stdout: StdioCollector {
+      onStreamFinished: {
+        var ok = false
+        try { ok = JSON.parse(text).ok === true } catch (e) { ok = false }
+        if (ok) {
+          root.trusted = true
+          root.trustInfo = null
+          root.showCameras()
+          root.refresh()
+        } else {
+          // The certificate moved between showing it and agreeing to it, or
+          // the console stopped answering. Either way nothing was pinned, so
+          // go round again on what is there now.
+          root.trustError = "that certificate is no longer the one answering"
+          root.showTrust()
+        }
+      }
+    }
+  }
+
+  Process {
     id: statusProc
     stdout: StdioCollector {
       onStreamFinished: {
         try {
           var data = JSON.parse(text)
           root.hasKey = data.hasKey === true
+          root.trusted = data.trusted === true
           if (root.opened && root.needsSetup) {
             if (root.view !== "settings") root.showSettings()
-          } else if (root.opened && !root.needsSetup && !root.userWantsSettings) {
+          } else if (root.opened && root.needsTrust) {
+            // A key with nothing pinned yet: the fingerprint has to be looked
+            // at before the key is allowed anywhere near the wire.
+            if (root.view !== "trust") root.showTrust()
+          } else if (root.opened && !root.userWantsSettings) {
             root.showCameras()
           }
         } catch (e) {
@@ -822,9 +902,19 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     // Wide enough that the live view is worth looking at rather than merely
-    // present. `fittedContentWidth` caps it to the screen, so a number too
-    // large for a small display is trimmed rather than clipped.
-    contentWidth: popup.fittedContentWidth(Style.space(root.panelWidth))
+    // present. The certificate step has no picture in it, only a sentence and
+    // a fingerprint, and at full width that reads as a banner rather than as a
+    // question: narrow it to something a person actually scans.
+    //
+    // Plain property reads rather than `fittedContentWidth`, because the width
+    // changes while the panel is already open. That helper resolves once on
+    // opening and never re-evaluates, so the card would stay whatever width it
+    // was when it appeared.
+    readonly property int desiredWidth:
+      Style.space(root.view === "trust" ? 430 : root.panelWidth)
+    contentWidth: Math.min(desiredWidth,
+                           popup.availableCardWidth > 0 ? popup.availableCardWidth
+                                                        : desiredWidth)
     contentHeight: popup.fittedContentHeight(content.implicitHeight)
 
     PanelKeyCatcher {
@@ -1190,6 +1280,91 @@ Panel {
         color: root.foreground
         opacity: 0.6
       }
+      }
+
+      // The certificate step. Between having a key and using it: the console
+      // signs its own certificate, so nothing but this comparison separates it
+      // from anything else that can answer at that address. Deliberately not a
+      // step the widget takes on your behalf.
+      Column {
+        visible: root.view === "trust"
+        width: parent.width
+        spacing: Style.space(10)
+
+        Text {
+          width: parent.width
+          textFormat: Text.PlainText
+          text: "Check the console before trusting it"
+          wrapMode: Text.WordWrap
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+          color: root.foreground
+        }
+
+        Text {
+          width: parent.width
+          textFormat: Text.PlainText
+          text: root.trustInfo
+            ? "This is what answers at " + root.plain(root.host)
+              + ". Hold the fingerprint against the one your console shows "
+              + "under Settings, System. They have to match."
+            : (root.trustError !== "" ? root.trustError : "Reading the certificate...")
+          wrapMode: Text.WordWrap
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          color: root.trustError !== "" ? (bar ? bar.urgent : Color.urgent) : root.foreground
+          opacity: root.trustError !== "" ? 1 : 0.7
+        }
+
+        // Wrapped rather than elided: half a fingerprint cannot be compared,
+        // and a fingerprint that looks right for the first eight characters is
+        // exactly the trap this screen exists to close.
+        Text {
+          width: parent.width
+          visible: root.trustInfo !== null
+          textFormat: Text.PlainText
+          text: root.trustInfo ? root.plain(root.trustInfo.fingerprint) : ""
+          wrapMode: Text.WrapAnywhere
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          color: root.foreground
+        }
+
+        Text {
+          width: parent.width
+          visible: root.trustInfo !== null
+          textFormat: Text.PlainText
+          text: root.trustInfo
+            ? root.plain(root.trustInfo.subject) + ", expires "
+              + root.plain(root.trustInfo.expires)
+            : ""
+          wrapMode: Text.WordWrap
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          color: root.foreground
+          opacity: 0.6
+        }
+
+        Row {
+          spacing: Style.space(8)
+
+          Button {
+            text: "Pin and connect"
+            enabled: root.trustInfo !== null && !trustAcceptProc.running
+            focusable: true
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onClicked: root.acceptTrust()
+          }
+
+          Button {
+            text: "Settings"
+            focusable: true
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onClicked: { root.userWantsSettings = true; root.showSettings() }
+          }
+        }
       }
 
       Flickable {
