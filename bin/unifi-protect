@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# unifi-protect — read UniFi Protect cameras, for the bar widget to call.
+# unifi-protect: read UniFi Protect cameras, for the bar widget to call.
 #
 #   unifi-protect list             # {"ok":true,"cameras":[{"id":..,"name":..,"connected":..}]}
 #   unifi-protect snapshot <id>    # writes a JPEG, prints its path
@@ -11,7 +11,7 @@
 #   unifi-protect stream <id>      # prints the RTSP url of the live stream
 #   unifi-protect live <id>        # opens the live RTSPS stream in mpv
 #   unifi-protect watch            # streams motion as NDJSON, one event per line
-#   unifi-protect status           # {ok, hasKey, trusted, host} — no network
+#   unifi-protect status           # {ok, hasKey, trusted, host}, no network
 #   unifi-protect set-key          # writes a key from stdin to the key file
 #   unifi-protect trust            # pins the gateway's certificate; run once
 #   unifi-protect trust show       # the live certificate, as JSON; no writes
@@ -790,7 +790,7 @@ asyncio.run(main())
 
   set-key)
     # The key arrives on stdin so it never appears in argv (or in a
-    # `ps` listing). First non-blank line, trimmed — the same rule `key()`
+    # `ps` listing). First non-blank line, trimmed, the same rule `key()`
     # reads back. The file is 0600: the umask at the top covers a new file,
     # and chmod puts a looser existing file back.
     untrace

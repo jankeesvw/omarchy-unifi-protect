@@ -67,7 +67,7 @@ Panel {
   // its next tick ten minutes on; watchProc is started once and never
   // restarts, so on any console that isn't 192.168.1.1 motion never reaches
   // the bar for the life of the shell. Restarting on a changed command covers
-  // that first turn and a setting edited later both — which is what the
+  // that first turn and a setting edited later both, which is what the
   // comment above the host property promises.
   readonly property var watchCommand: root.cmd(["watch"])
 

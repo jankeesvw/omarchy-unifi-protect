@@ -135,7 +135,7 @@ entry in `~/.config/omarchy/shell.json`:
 |---|---|---|
 | `host` | `192.168.1.1` | The console running Protect: a UDM, a Cloud Key, whatever answers on your network. Address or hostname, no scheme. |
 | `alertCameras` | *(empty)* | Camera names, comma separated, that may light the icon and file frames. Empty means all of them. |
-| `notify` | `true` | Raise a desktop notification, with the frame in it, on motion. Sets the starting position of the switch in the panel's header — see below. |
+| `notify` | `true` | Raise a desktop notification, with the frame in it, on motion. Sets the starting position of the switch in the panel's header, see below. |
 | `viewerCommand` | `xdg-open {path}` | What clicking that notification runs, to see the frame full size. |
 | `panelWidth` | `800` | Panel width in the shell's spacing units. Trimmed to fit a small screen. |
 | `motionHoldMs` | `45000` | How long the icon stays lit after motion. |
