@@ -10,7 +10,12 @@
 #   unifi-protect stream <id>      # prints the RTSP url of the live stream
 #   unifi-protect live <id>        # opens the live RTSPS stream in mpv
 #   unifi-protect watch            # streams motion as NDJSON, one event per line
+#   unifi-protect status           # {ok, hasKey, trusted, host} — no network
+#   unifi-protect set-key          # writes a key from stdin to the key file
 #   unifi-protect trust            # pins the gateway's certificate; run once
+#   unifi-protect trust show       # the live certificate, as JSON; no writes
+#   unifi-protect trust accept <fp>
+#                                  # pins that fingerprint after re-fetching
 #   unifi-protect setup            # a python with websockets for motion, if
 #                                  # your distro has no package for it
 #
@@ -35,12 +40,14 @@
 # see `key()` below.
 #
 # Because that key is worth as much as the account behind it, nothing here
-# talks to the gateway until its certificate has been pinned with
-# `unifi-protect trust`. The gateway signs its own certificate, so there is no
-# chain to check it against and no authority to ask; pinning is what turns
-# "some host answered on this address" into "the host I looked at when I set
-# this up". Without it the -k every one of these calls needs would hand the
-# key to whatever answered.
+# talks to the gateway without a pinned certificate. The first connection
+# files whatever is answering (trust on first use); later ones have to
+# present that same key or they are dropped before the header goes out.
+# The gateway signs its own certificate, so there is no chain to check it
+# against and no authority to ask. `unifi-protect trust` is still there if
+# you would rather look at the fingerprint yourself first. Without a pin
+# the -k every one of these calls needs would hand the key to whatever
+# answered.
 
 set -uo pipefail
 
@@ -82,7 +89,7 @@ CACHE_DIR="${CACHE_DIR:-/tmp/unifi-protect-$(id -u)}"
 # The archive outlives a reboot, so it lives in state rather than runtime.
 ARCHIVE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/unifi-protect/events"
 KEY_FILE="${UNIFI_API_KEY_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/unifi-protect/api-key}"
-# The gateway's certificate, as pinned by `unifi-protect trust`.
+# The gateway's certificate, filed on first contact or by `unifi-protect trust`.
 CERT_FILE="${UNIFI_CERT_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/unifi-protect/gateway.pem}"
 
 # Where `unifi-protect setup` puts a python for the motion watcher, on a
@@ -222,15 +229,17 @@ retrace() { (( TRACED )) && set -x; return 0; }
 
 untrace
 KEY="$(key)"
-[[ -n "$KEY" ]] || fail "no API key: set UNIFI_API_KEY or write one to $KEY_FILE"
+retrace
 
 # The key goes to curl on stdin rather than in an argument, and a quote or a
 # backslash would end that line early and turn the rest of the key into curl
 # options -- a `user = "..."` of the sender's choosing, say, or a second
 # header. A Protect key is drawn from this set, so a key that is not is not a
-# key worth sending anywhere.
-[[ "$KEY" =~ ^[A-Za-z0-9._~+/=-]+$ ]] || fail "malformed API key: set UNIFI_API_KEY or write one to $KEY_FILE"
-retrace
+# key worth sending anywhere. Checked in require_key rather than here:
+# status, set-key and trust have to run with no key on file yet.
+valid_key() {
+  [[ "$1" =~ ^[A-Za-z0-9._~+/=-]+$ ]]
+}
 
 # The SHA-256 of the pinned certificate's public key, in the form curl wants.
 # Read off the first certificate in the file, which is the gateway's own.
@@ -244,12 +253,19 @@ spki() {
 # Every call that carries the key goes through this first. Resolved in the
 # main shell rather than lazily inside api(), which runs in a subshell where
 # an exit would be reported back as nothing more than an unreachable gateway.
+require_key() {
+  [[ -n "$KEY" ]] || fail "no API key: set UNIFI_API_KEY or write one to $KEY_FILE"
+  valid_key "$KEY" || fail "malformed API key: set UNIFI_API_KEY or write one to $KEY_FILE"
+}
+
 PIN=""
 require_pin() {
   [[ -n "$PIN" ]] && return
-  [[ -r "$CERT_FILE" ]] || fail "gateway not trusted yet: run 'unifi-protect --host $HOST trust'"
-  PIN="$(spki "$CERT_FILE")"
-  [[ -n "$PIN" ]] || fail "no certificate in $CERT_FILE: run 'unifi-protect --host $HOST trust' again"
+  if [[ -r "$CERT_FILE" ]]; then
+    PIN="$(spki "$CERT_FILE")"
+    [[ -n "$PIN" ]] && return
+  fi
+  auto_pin
 }
 
 # -k is still here and still cannot go: the certificate names the console, not
@@ -286,8 +302,56 @@ api() {
   curl_key -m "$TIMEOUT" "$API$1"
 }
 
+# --host may already carry a port, in which case that is the one to look at.
+gateway_target() {
+  local target="$HOST"
+  [[ "$target" == *:* ]] || target="$HOST:443"
+  printf '%s' "$target"
+}
+
+# The certificate chain currently answering on the gateway, PEM, leaf first.
+fetch_chain() {
+  openssl s_client -connect "$1" -showcerts </dev/null 2>/dev/null \
+    | sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p'
+}
+
+# First time we talk to this address: file whatever is answering, then pin
+# to it. Later calls that already have a pin keep that pin; a certificate
+# that no longer matches is a refused connection, not a rewrite.
+auto_pin() {
+  command -v openssl >/dev/null 2>&1 || fail "openssl is needed to talk to the gateway"
+  local target chain
+  target="$(gateway_target)"
+  chain="$(fetch_chain "$target")"
+  [[ -n "$chain" ]] || fail "cannot reach https://$target/ to read its certificate"
+  private_dir "${CERT_FILE%/*}" || fail "cannot write ${CERT_FILE%/*}"
+  printf '%s\n' "$chain" > "$CERT_FILE" || fail "cannot write $CERT_FILE"
+  chmod 600 -- "$CERT_FILE" || fail "cannot write $CERT_FILE"
+  PIN="$(spki "$CERT_FILE")"
+  [[ -n "$PIN" ]] || fail "that is not a certificate"
+}
+
+# SHA-256 fingerprint of the first certificate on stdin, openssl's colon form.
+cert_fingerprint() {
+  openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2-
+}
+
+file_fingerprint() {
+  openssl x509 -in "$1" -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2-
+}
+
+# Hex only, uppercase, so "AA:BB" and "aabb" compare equal. A pasted
+# "SHA256 Fingerprint=..." line has its label stripped first, because those
+# words themselves contain hex digits.
+normalize_fp() {
+  local s="$1"
+  s="${s##*[Ff]ingerprint=}"
+  printf '%s' "$s" | tr '[:lower:]' '[:upper:]' | tr -d ' \t:'
+}
+
 case "${1:-list}" in
   list)
+    require_key
     tls_args
     body="$(api /cameras)" || fail "unreachable"
     [[ -n "$body" ]] || fail "unreachable"
@@ -303,6 +367,7 @@ case "${1:-list}" in
     id="${2:-}"
     [[ -n "$id" ]] || fail "usage: unifi-protect snapshot <camera-id>"
     check_id "$id"
+    require_key
     tls_args
     private_dir "$CACHE_DIR" || fail "$CACHE_DIR is not a directory of ours"
 
@@ -335,6 +400,7 @@ case "${1:-list}" in
     name="${3:-}"
     [[ -n "$id" ]] || fail "usage: unifi-protect capture <camera-id> [name]"
     check_id "$id"
+    require_key
     tls_args
     private_dir "$ARCHIVE_DIR" || fail "$ARCHIVE_DIR is not a directory of ours"
 
@@ -439,6 +505,7 @@ case "${1:-list}" in
     id="${2:-}"
     [[ -n "$id" ]] || fail "usage: unifi-protect stream <camera-id>"
     check_id "$id"
+    require_key
     tls_args
     url="$(api "/cameras/$id/rtsps-stream" | jq -r '.high // .medium // .low // empty')"
     [[ -n "$url" ]] || fail "no stream for camera $id"
@@ -458,6 +525,7 @@ case "${1:-list}" in
     id="${2:-}"
     [[ -n "$id" ]] || fail "usage: unifi-protect live <camera-id>"
     check_id "$id"
+    require_key
     tls_args
     url="$(api "/cameras/$id/rtsps-stream" | jq -r '.high // .medium // .low // empty')"
     [[ -n "$url" ]] || fail "no stream for camera $id"
@@ -488,6 +556,7 @@ case "${1:-list}" in
     # upgrade with a 404 rather than refusing it, which looks exactly like a
     # missing endpoint. websockets does 1.1, so this is only a trap when
     # testing by hand with curl.
+    require_key
     tls_args
     # The key goes in on a pipe, and only the two public values are exported.
     #
@@ -668,63 +737,149 @@ asyncio.run(main())
     printf '\nDone: %s\nRestart the shell to pick it up.\n' "$VENV_PYTHON"
     ;;
 
-  trust)
-    # Run once, by hand, before anything else works. Trust-on-first-use: this
-    # looks at whatever is answering on the address right now, shows you its
-    # fingerprint so you can hold it against the one the console shows under
-    # Settings -> System, and files it. From then on that certificate is the
-    # only one the key is ever handed to.
-    #
-    # Human output, not JSON -- nothing in the widget calls this.
-    command -v openssl >/dev/null 2>&1 || {
-      printf 'openssl is needed to pin the certificate\n' >&2; exit 1; }
-
-    # --host may already carry a port, in which case that is the one to look at.
-    target="$HOST"; [[ "$target" == *:* ]] || target="$HOST:443"
-    chain="$(openssl s_client -connect "$target" -showcerts </dev/null 2>/dev/null \
-      | sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p')"
-    [[ -n "$chain" ]] || {
-      printf 'cannot reach https://%s/ to read its certificate\n' "$target" >&2; exit 1; }
-
-    detail() { printf '%s' "$chain" | openssl x509 -noout "$@" 2>/dev/null | cut -d= -f2-; }
-    new_fp="$(detail -fingerprint -sha256)"
-    [[ -n "$new_fp" ]] || { printf 'that is not a certificate\n' >&2; exit 1; }
-
-    printf 'Gateway    https://%s/\n' "$target"
-    printf 'Subject    %s\n' "$(detail -subject)"
-    printf 'Issuer     %s\n' "$(detail -issuer)"
-    printf 'Expires    %s\n' "$(detail -enddate)"
-    printf 'SHA-256    %s\n\n' "$new_fp"
-
+  status)
+    # Local only: the panel uses this to tell "needs key" from
+    # "unreachable" without sending anything to the gateway. `trusted`
+    # is whether a pin is already on file, not a setup gate.
+    has_key=false
+    [[ -n "$KEY" ]] && has_key=true
+    trusted=false
     if [[ -r "$CERT_FILE" ]]; then
-      old_fp="$(openssl x509 -in "$CERT_FILE" -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2-)"
-      if [[ -n "$old_fp" && "$old_fp" != "$new_fp" ]]; then
-        printf 'This is NOT the certificate currently pinned:\n'
-        printf '  pinned   %s\n\n' "$old_fp"
-        printf 'A console that was reset or reinstalled explains this. So does\n'
-        printf 'something else answering on the address. Check before you agree.\n\n'
-      fi
+      pinned_fp="$(file_fingerprint "$CERT_FILE")"
+      [[ -n "$pinned_fp" ]] && trusted=true
     fi
+    jq -nc --arg host "$HOST" --argjson hasKey "$has_key" --argjson trusted "$trusted" \
+      '{ok:true, hasKey:$hasKey, trusted:$trusted, host:$host}'
+    ;;
 
-    printf 'Compare that fingerprint against the console itself before you agree:\n'
-    printf 'trusting it here is the whole of what keeps your API key from being\n'
-    printf 'handed to anything else that answers on this address.\n\n'
+  set-key)
+    # The key arrives on stdin so it never appears in argv (or in a
+    # `ps` listing). First non-blank line, trimmed — the same rule `key()`
+    # reads back. The file is 0600: the umask at the top covers a new file,
+    # and chmod puts a looser existing file back.
+    untrace
+    new_key=""
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      line="${line#"${line%%[![:space:]]*}"}"
+      line="${line%"${line##*[![:space:]]}"}"
+      [[ -n "$line" ]] || continue
+      new_key="$line"
+      break
+    done
+    [[ -n "$new_key" ]] || fail "empty key"
+    valid_key "$new_key" || fail "malformed API key"
+    private_dir "${KEY_FILE%/*}" || fail "cannot write ${KEY_FILE%/*}"
+    printf '%s\n' "$new_key" > "$KEY_FILE" || fail "cannot write $KEY_FILE"
+    retrace
+    chmod 600 -- "$KEY_FILE" || fail "cannot write $KEY_FILE"
+    printf '{"ok":true}\n'
+    ;;
 
-    if [[ -t 0 ]]; then
-      read -r -p 'Pin this certificate? [y/N] ' answer
-      [[ "$answer" == [yY]* ]] || { printf 'Nothing pinned.\n' >&2; exit 1; }
-    fi
+  trust)
+    # Look at whatever is answering on the address right now, show its
+    # fingerprint so it can be held against the one the console shows
+    # under Settings -> System, and file it. Ordinary use pins on first
+    # contact instead; this is for looking first, or pinning again after
+    # a console reset.
+    #
+    # `trust` on its own is the interactive terminal form. `trust show`
+    # and `trust accept` are JSON for scripts: show never writes, accept
+    # re-fetches and pins only if the fingerprint still matches.
+    case "${2:-}" in
+      show)
+        command -v openssl >/dev/null 2>&1 || fail "openssl is needed to pin the certificate"
+        target="$(gateway_target)"
+        chain="$(fetch_chain "$target")"
+        [[ -n "$chain" ]] || fail "cannot reach https://$target/ to read its certificate"
+        new_fp="$(printf '%s' "$chain" | cert_fingerprint)"
+        [[ -n "$new_fp" ]] || fail "that is not a certificate"
+        detail() { printf '%s' "$chain" | openssl x509 -noout "$@" 2>/dev/null | cut -d= -f2-; }
+        old_fp=""
+        [[ -r "$CERT_FILE" ]] && old_fp="$(file_fingerprint "$CERT_FILE")"
+        match=false
+        if [[ -n "$old_fp" && "$(normalize_fp "$old_fp")" == "$(normalize_fp "$new_fp")" ]]; then
+          match=true
+        fi
+        jq -nc \
+          --arg fingerprint "$new_fp" \
+          --arg subject "$(detail -subject)" \
+          --arg expires "$(detail -enddate)" \
+          --arg pinned "$old_fp" \
+          --argjson match "$match" \
+          '{ok:true, fingerprint:$fingerprint, subject:$subject, expires:$expires, pinned:$pinned, match:$match}'
+        ;;
 
-    # Same check as the cache and the archive get. This is the directory the
-    # key file lives in too, and an install from before the umask above was
-    # here left it at 755 -- so the first run of `trust` closes it, along with
-    # anything a previous version wrote into it.
-    private_dir "${CERT_FILE%/*}" || {
-      printf '%s is not a directory of ours\n' "${CERT_FILE%/*}" >&2; exit 1; }
-    (umask 077; printf '%s\n' "$chain" > "$CERT_FILE") || {
-      printf 'cannot write %s\n' "$CERT_FILE" >&2; exit 1; }
+      accept)
+        command -v openssl >/dev/null 2>&1 || fail "openssl is needed to pin the certificate"
+        [[ -n "${3:-}" ]] || fail "usage: unifi-protect trust accept <sha256-fingerprint>"
+        want="$(normalize_fp "$3")"
+        [[ "$want" =~ ^[0-9A-F]{64}$ ]] || fail "not a sha256 fingerprint"
+        target="$(gateway_target)"
+        chain="$(fetch_chain "$target")"
+        [[ -n "$chain" ]] || fail "cannot reach https://$target/ to read its certificate"
+        new_fp="$(printf '%s' "$chain" | cert_fingerprint)"
+        [[ -n "$new_fp" ]] || fail "that is not a certificate"
+        got="$(normalize_fp "$new_fp")"
+        [[ "$got" == "$want" ]] || fail "certificate changed before it could be pinned"
+        private_dir "${CERT_FILE%/*}" || fail "cannot write ${CERT_FILE%/*}"
+        (umask 077; printf '%s\n' "$chain" > "$CERT_FILE") || fail "cannot write $CERT_FILE"
+        printf '{"ok":true}\n'
+        ;;
 
-    printf 'Pinned to %s\n' "$CERT_FILE"
+      "")
+        command -v openssl >/dev/null 2>&1 || {
+          printf 'openssl is needed to pin the certificate\n' >&2; exit 1; }
+
+        target="$(gateway_target)"
+        chain="$(fetch_chain "$target")"
+        [[ -n "$chain" ]] || {
+          printf 'cannot reach https://%s/ to read its certificate\n' "$target" >&2; exit 1; }
+
+        detail() { printf '%s' "$chain" | openssl x509 -noout "$@" 2>/dev/null | cut -d= -f2-; }
+        new_fp="$(detail -fingerprint -sha256)"
+        [[ -n "$new_fp" ]] || { printf 'that is not a certificate\n' >&2; exit 1; }
+
+        printf 'Gateway    https://%s/\n' "$target"
+        printf 'Subject    %s\n' "$(detail -subject)"
+        printf 'Issuer     %s\n' "$(detail -issuer)"
+        printf 'Expires    %s\n' "$(detail -enddate)"
+        printf 'SHA-256    %s\n\n' "$new_fp"
+
+        if [[ -r "$CERT_FILE" ]]; then
+          old_fp="$(file_fingerprint "$CERT_FILE")"
+          if [[ -n "$old_fp" && "$old_fp" != "$new_fp" ]]; then
+            printf 'This is NOT the certificate currently pinned:\n'
+            printf '  pinned   %s\n\n' "$old_fp"
+            printf 'A console that was reset or reinstalled explains this. So does\n'
+            printf 'something else answering on the address. Check before you agree.\n\n'
+          fi
+        fi
+
+        printf 'Compare that fingerprint against the console itself before you agree:\n'
+        printf 'trusting it here is the whole of what keeps your API key from being\n'
+        printf 'handed to anything else that answers on this address.\n\n'
+
+        if [[ -t 0 ]]; then
+          read -r -p 'Pin this certificate? [y/N] ' answer
+          [[ "$answer" == [yY]* ]] || { printf 'Nothing pinned.\n' >&2; exit 1; }
+        fi
+
+        # Same check as the cache and the archive get. This is the directory
+        # the key file lives in too, and an install from before the umask
+        # above was here left it at 755 -- so the first run of `trust` closes
+        # it, along with anything a previous version wrote into it.
+        private_dir "${CERT_FILE%/*}" || {
+          printf '%s is not a directory of ours\n' "${CERT_FILE%/*}" >&2; exit 1; }
+        (umask 077; printf '%s\n' "$chain" > "$CERT_FILE") || {
+          printf 'cannot write %s\n' "$CERT_FILE" >&2; exit 1; }
+
+        printf 'Pinned to %s\n' "$CERT_FILE"
+        ;;
+
+      *)
+        fail "usage: unifi-protect trust [show|accept <sha256-fingerprint>]"
+        ;;
+    esac
     ;;
 
   *)
