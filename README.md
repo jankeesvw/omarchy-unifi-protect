@@ -7,7 +7,7 @@ pictures in a panel behind it.
 ![The panel open: one camera large, the others as thumbnails, and the frames filed the last time something moved](preview.jpg)
 
 The bar shows a camera glyph and nothing else. It lights up, and the name of
-the camera slides in beside it, while Protect reports motion — so a camera
+the camera slides in beside it, while Protect reports motion, so a camera
 that sees something is noticeable out of the corner of your eye without a
 video feed sitting in the bar all day.
 
@@ -31,7 +31,7 @@ on settings instead of cameras:
 
 The first time the widget talks to the console it files that certificate
 and keeps talking only to it. The same two steps can be done from the
-shell if you would rather script them — the sections below. The widget
+shell if you would rather script them: the sections below. The widget
 lands in the right section of the bar; move it with `omarchy bar move`,
 or from the bar's own settings panel.
 
@@ -45,11 +45,23 @@ Everything goes through Protect's integration API, which takes a plain
 > own admin login is your whole console in a file on your laptop.
 >
 > Make a local user for it instead. Under **Settings → Admins & Users → Add
-> User**, choose a local account, give it **Protect: View Only** and nothing
-> else, and make the key while signed in as that user. The widget only ever
-> lists cameras, pulls stills and reads stream urls, so view-only is all it
-> needs — and a key that leaks is then a key that can look at your cameras
-> rather than one that can reconfigure your network.
+> User**, choose a local account and sign in as that user to make the key. The
+> widget only ever lists cameras, pulls stills and reads stream urls, so
+> **Protect: View Only** is all it ever needs, and a key that leaks is then a
+> key that can look at your cameras rather than one that can reconfigure your
+> network.
+>
+> On at least some consoles the integrations page that hands out keys is only
+> reachable by a Full Site Admin, so a view-only account cannot get to it. The
+> way round it is to give that local user admin rights, make the key, and set
+> it straight back to **Protect: View Only**. Thanks to @GeertJohan for
+> working that out on a UDM Pro.
+>
+> One thing worth knowing before you rely on that: we have not confirmed
+> whether UniFi re-reads the account's rights on every request or freezes them
+> when the key is made. If it is the latter, the key still carries admin
+> rights however the account is set afterwards. Treat it as an admin key until
+> somebody checks.
 
 The panel's settings view is the ordinary way to file a key: paste it, save,
 and it is written to the key file over stdin so it never appears on a process
@@ -83,7 +95,7 @@ file is parsed.
 ## Pinning the console
 
 Your console signs its own certificate. There is no authority that can vouch
-for it, so there is nothing to check it against — and the key above travels on
+for it, so there is nothing to check it against, and the key above travels on
 every one of these connections. The first time the widget talks to the
 console it files whatever certificate is answering, then every later
 connection has to present that same key or be dropped before the API key
@@ -109,13 +121,13 @@ approved is the one filed.
 
 The console address, the API key, which cameras may interrupt you, and the
 motion notification live in the widget's own settings view (the gear on
-the panel). The rest — panel width, snapshot interval, how long the icon
-stays lit — stays in the bar's settings panel, or by hand in the widget's
+the panel). The rest, panel width, snapshot interval and how long the icon
+stays lit, stays in the bar's settings panel, or by hand in the widget's
 entry in `~/.config/omarchy/shell.json`:
 
 | Setting | Default | What it does |
 |---|---|---|
-| `host` | `192.168.1.1` | The console running Protect — a UDM, a Cloud Key, whatever answers on your network. Address or hostname, no scheme. |
+| `host` | `192.168.1.1` | The console running Protect: a UDM, a Cloud Key, whatever answers on your network. Address or hostname, no scheme. |
 | `alertCameras` | *(empty)* | Camera names, comma separated, that may light the icon and file frames. Empty means all of them. |
 | `notify` | `true` | Raise a desktop notification, with the frame in it, on motion. |
 | `viewerCommand` | `xdg-open {path}` | What clicking that notification runs, to see the frame full size. |
@@ -242,7 +254,7 @@ On Arch:
 sudo pacman -S --needed curl jq python python-websockets imagemagick libnotify mpv
 ```
 
-Chain and hostname checking are off for calls to the console — its
+Chain and hostname checking are off for calls to the console; its
 certificate names the console, not the address you reach it on, and nothing on
 your network can build a chain to it. What replaces them is the certificate
 filed on first contact: curl is given `--pinnedpubkey`, which it enforces
@@ -262,12 +274,12 @@ line. Nor does the key reach a log: `bash -x` prints the words of every
 command it runs, so the trace is switched off around the places that hold it.
 
 The key file and the pinned certificate are written under `umask 077`, and the
-directory holding them is checked to be a directory of yours at mode 700 —
+directory holding them is checked to be a directory of yours at mode 700,
 along with the frame cache and the archive, which are pictures of the inside of
 your house.
 
 Camera ids come off those connections and end up in filenames, so they are
-checked against `[A-Za-z0-9]{1,64}` — Protect's own format — and anything else
+checked against `[A-Za-z0-9]{1,64}`, Protect's own format, and anything else
 is refused rather than escaped.
 
 The live view reads the stream off the plain RTSP port rather than the
