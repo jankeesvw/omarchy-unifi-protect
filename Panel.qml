@@ -2,6 +2,7 @@ import QtQuick
 import QtMultimedia
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // UniFi Protect cameras: one icon in the bar, the pictures in the panel.
@@ -82,7 +83,7 @@ Panel {
     })
   }
 
-  readonly property color foreground: bar ? bar.foreground : Color.foreground
+  readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
   // Width of the panel, in the shell's spacing units. The live view is this
@@ -913,7 +914,7 @@ Panel {
     text: root.hasAlert ? root.motionCamera.name : ""
     font.family: root.fontFamily
     font.pixelSize: Style.font.bodySmall
-    color: root.bar ? root.bar.urgent : Color.urgent
+    color: root.bar ? root.bar.urgent : Commons.Color.urgent
 
     MouseArea {
       anchors.fill: parent
@@ -1375,7 +1376,7 @@ Panel {
           wrapMode: Text.WordWrap
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
-          color: root.trustError !== "" ? (bar ? bar.urgent : Color.urgent) : root.foreground
+          color: root.trustError !== "" ? (bar ? bar.urgent : Commons.Color.urgent) : root.foreground
           opacity: root.trustError !== "" ? 1 : 0.7
         }
 
